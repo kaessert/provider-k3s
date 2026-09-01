@@ -2,6 +2,15 @@ apiVersion: k3s.crossplane.io/v1alpha1
 kind: Node
 metadata:
   name: worker-1
+  annotations:
+    # Node can't even Connect() until the referenced Cluster's connection
+    # secret exists, which only happens once the Cluster's own SSH-based
+    # install finishes -- and that install alone can run close to the
+    # shared default test window on a nested/systemd-in-container test
+    # host. This timeout covers a full-length Cluster install PLUS the
+    # Node's own SSH-based k3s agent join on the same kind of host, with
+    # margin.
+    uptest.upbound.io/timeout: "3000"
 spec:
   forProvider:
     host: k3s-nodepool-1.k3s-nodepool.crossplane-system.svc.cluster.local
@@ -17,6 +26,11 @@ metadata:
   name: my-k3s-cluster
   annotations:
     uptest.upbound.io/pre-delete-hook: ./testhooks/delete-node.sh
+    # The k3s server install (download + systemd unit + readiness wait) has
+    # been observed taking close to the shared default test window by
+    # itself on a nested/systemd-in-container test host. This timeout gives
+    # the Cluster's own install room beyond that observed duration.
+    uptest.upbound.io/timeout: "1800"
 spec:
   forProvider:
     host: k3s-nodepool-0.k3s-nodepool.crossplane-system.svc.cluster.local
