@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
@@ -59,6 +60,23 @@ const (
 // the k3s install script does not return the server's own configuration.
 const annotationLastAppliedConfig = "k3s.crossplane.io/last-applied-cluster-config"
 
+// externalTimeout bounds the cumulative duration of one reconcile's calls to
+// the external API (Connect/Observe/Create/Update/Delete). Create and Update
+// block for the full duration of a k3s server install over SSH -- measured
+// to take a few minutes on a resource-constrained host -- and this must cover
+// that with real margin: crossplane-runtime persists the create-result
+// annotation with the SAME reconcile context Create ran under, so a Create
+// that merely times out promptly still needs enough of that budget left
+// afterward for the write to land, or the resource wedges on a dangling
+// external-create-pending annotation with no retry.
+const externalTimeout = 10 * time.Minute
+
+// No WithCreationGracePeriod override: Create blocks until the install
+// script itself reports success, so the k3s server is already running by
+// the time Create returns -- the default 30s grace period (for APIs that
+// are merely eventually consistent after a successful create call) isn't
+// needed here.
+
 // Setup adds a controller that reconciles namespaced Cluster managed resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.ClusterGroupKind)
@@ -70,6 +88,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		})),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
+		managed.WithTimeout(externalTimeout),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))), //nolint:staticcheck // event.NewAPIRecorder still requires the legacy record.EventRecorder.
 	}
 
@@ -175,7 +194,7 @@ type external struct {
 }
 
 func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalObservation, error) {
-	stdout, _, err := e.ssh.Execute("systemctl is-active k3s 2>/dev/null || echo inactive")
+	stdout, _, err := e.ssh.Execute(ctx, "systemctl is-active k3s 2>/dev/null || echo inactive")
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, "cannot check k3s status")
 	}
@@ -183,13 +202,13 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.E
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
-	versionOut, _, _ := e.ssh.Execute("k3s --version 2>/dev/null | head -1")
+	versionOut, _, _ := e.ssh.Execute(ctx, "k3s --version 2>/dev/null | head -1")
 	cr.Status.AtProvider.K3sVersion = versionOut
 	cr.Status.AtProvider.Ready = true
 
-	nodeToken, _, _ := e.ssh.Execute("sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null")
+	nodeToken, _, _ := e.ssh.Execute(ctx, "sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null")
 
-	kubeconfig, _, _ := e.ssh.Execute("sudo cat /etc/rancher/k3s/k3s.yaml 2>/dev/null")
+	kubeconfig, _, _ := e.ssh.Execute(ctx, "sudo cat /etc/rancher/k3s/k3s.yaml 2>/dev/null")
 	if kubeconfig != "" {
 		kubeconfig = k3s.RewriteKubeconfig(kubeconfig, e.host)
 	}
@@ -229,7 +248,7 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Cluster) (managed.Ex
 
 	cmd := k3s.InstallCommand(installParamsFor(cr.Spec.ForProvider))
 
-	_, stderr, err := e.ssh.Execute(cmd)
+	_, stderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
 		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot install k3s: %s", stderr)
 	}
@@ -251,7 +270,7 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Cluster) (managed.Ex
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalUpdate, error) {
 	cmd := k3s.InstallCommand(installParamsFor(cr.Spec.ForProvider))
 
-	_, stderr, err := e.ssh.Execute(cmd)
+	_, stderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
 		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s: %s", stderr)
 	}
@@ -286,7 +305,7 @@ func installParamsFor(p v1alpha1.ClusterParameters) k3s.InstallParams {
 func (e *external) Delete(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalDelete, error) {
 	cr.SetConditions(xpv1.Deleting())
 
-	_, stderr, err := e.ssh.Execute(k3s.UninstallServerCommand())
+	_, stderr, err := e.ssh.Execute(ctx, k3s.UninstallServerCommand())
 	if err != nil {
 		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", stderr)
 	}
