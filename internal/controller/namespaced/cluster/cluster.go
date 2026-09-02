@@ -41,6 +41,7 @@ import (
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/namespaced/v1alpha1"
 	sshclient "github.com/crossplane-contrib/provider-k3s/internal/clients/ssh"
+	"github.com/crossplane-contrib/provider-k3s/internal/criticalannotation"
 	"github.com/crossplane-contrib/provider-k3s/internal/driftdetection"
 	"github.com/crossplane-contrib/provider-k3s/internal/k3s"
 )
@@ -90,6 +91,11 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		managed.WithPollInterval(o.PollInterval),
 		managed.WithTimeout(externalTimeout),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))), //nolint:staticcheck // event.NewAPIRecorder still requires the legacy record.EventRecorder.
+		// The critical-annotation write that clears the pending-create marker
+		// after Create() must not inherit the context Create's own blocking
+		// SSH call just spent -- see the criticalannotation package doc for
+		// why a fresh, detached budget is required here.
+		managed.WithCriticalAnnotationUpdater(criticalannotation.WrapUpdater(managed.NewRetryingCriticalAnnotationUpdater(mgr.GetClient()))),
 	}
 
 	if o.Features.Enabled(feature.EnableBetaManagementPolicies) {
