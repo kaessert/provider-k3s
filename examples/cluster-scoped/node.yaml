@@ -2,6 +2,15 @@ apiVersion: k3s.crossplane.io/v1alpha1
 kind: Node
 metadata:
   name: worker-1
+  annotations:
+    # A live run (2026-09-02) measured the referenced Cluster's own SSH
+    # install at 19m25s (1165s) end to end, and Node can't even Connect()
+    # until that Cluster's connection secret exists -- so Node's own
+    # window has to cover the full Cluster install before its own SSH
+    # agent join can even start. This value covers a full-length Cluster
+    # install (see the Cluster annotation below) plus room for the Node's
+    # own join and readiness confirmation on the same class of host.
+    uptest.upbound.io/timeout: "3000"
 spec:
   forProvider:
     host: k3s-nodepool-1.k3s-nodepool.crossplane-system.svc.cluster.local
@@ -17,6 +26,12 @@ metadata:
   name: my-k3s-cluster
   annotations:
     uptest.upbound.io/pre-delete-hook: ./testhooks/delete-node.sh
+    # A live run (2026-09-02) measured this SSH-based k3s server install
+    # (download + systemd unit + readiness wait) at 19m25s (1165s) on a
+    # nested/systemd-in-container test host -- against the 1200s shared
+    # default assert window that leaves only ~35s of margin. This value
+    # gives ~635s of margin over the observed duration.
+    uptest.upbound.io/timeout: "1800"
 spec:
   forProvider:
     host: k3s-nodepool-0.k3s-nodepool.crossplane-system.svc.cluster.local
