@@ -18,6 +18,7 @@ package ssh
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -80,22 +81,50 @@ func NewClient(cfg Config) (*Client, error) {
 }
 
 // Execute runs a command on the remote host and returns stdout and stderr.
-func (c *Client) Execute(cmd string) (stdout, stderr string, err error) {
+// It honours ctx: if ctx is done before the remote command finishes, Execute
+// closes the SSH session (ending the blocking wait promptly) and returns
+// ctx.Err() rather than blocking until the command completes on its own.
+// Without this, a slow remote command (a multi-minute k3s install, for
+// example) blocks past the caller's deadline, and by the time it does
+// return, every context-aware call the caller makes next (a Kubernetes API
+// write to persist the result) fails immediately too -- because the SAME,
+// already-expired context is still what's guarding those calls.
+func (c *Client) Execute(ctx context.Context, cmd string) (stdout, stderr string, err error) {
 	session, err := c.conn.NewSession()
 	if err != nil {
 		return "", "", errors.Wrap(err, errSSHSession)
 	}
-	defer session.Close() //nolint:errcheck
+	defer session.Close() //nolint:errcheck // best-effort: either the done path or the ctx.Done() path already closed it
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	session.Stdout = &stdoutBuf
 	session.Stderr = &stderrBuf
 
-	if err := session.Run(cmd); err != nil {
-		return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), errors.Wrap(err, errSSHExecute)
+	if err := session.Start(cmd); err != nil {
+		return "", "", errors.Wrap(err, errSSHExecute)
 	}
 
-	return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), nil
+	done := make(chan error, 1)
+	go func() { done <- session.Wait() }()
+
+	select {
+	case <-ctx.Done():
+		// Close the session so the blocked Wait() goroutine above returns
+		// and this call unblocks promptly instead of waiting for the
+		// remote command to finish on its own schedule. Then wait for
+		// that goroutine to actually finish before reading the buffers:
+		// Wait() only returns once the stdout/stderr copy goroutines it
+		// started have stopped writing to them, so reading any earlier
+		// races with those writes.
+		_ = session.Close()
+		<-done
+		return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), errors.Wrap(ctx.Err(), errSSHExecute)
+	case waitErr := <-done:
+		if waitErr != nil {
+			return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), errors.Wrap(waitErr, errSSHExecute)
+		}
+		return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), nil
+	}
 }
 
 // ConfigureAuth sets the appropriate authentication on the Config

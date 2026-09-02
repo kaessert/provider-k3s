@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"net"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -30,11 +31,16 @@ import (
 )
 
 // sshResponse is the canned reply fakeSSHServer sends back for one exec
-// command.
+// command. A non-zero Delay holds the reply for that long before sending it
+// -- or abandons it early, without replying, if the client tears the session
+// down first (which is what sshclient.Client.Execute does on context
+// cancellation) -- so tests can exercise a slow remote command without
+// hand-rolling a second SSH server.
 type sshResponse struct {
 	Stdout   string
 	Stderr   string
 	ExitCode uint32
+	Delay    time.Duration
 }
 
 // fakeSSHServer is a real, in-process SSH server built on
@@ -120,9 +126,16 @@ func (s *fakeSSHServer) handleConn(nConn net.Conn) {
 
 // handleSession answers "exec" requests with the canned response for the
 // command, ignoring every other request type (shell, pty-req, ...) since
-// the provider only ever runs a single command per session.
+// the provider only ever runs a single command per session. A response
+// carrying a Delay is held for that long -- or abandoned, without replying,
+// if the requests channel closes first because the client tore the session
+// down (context cancellation).
 func (s *fakeSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.Request) {
-	for req := range requests {
+	for {
+		req, ok := <-requests
+		if !ok {
+			return
+		}
 		if req.Type != "exec" {
 			if req.WantReply {
 				_ = req.Reply(false, nil)
@@ -139,6 +152,19 @@ func (s *fakeSSHServer) handleSession(channel ssh.Channel, requests <-chan *ssh.
 		if !ok {
 			resp = s.fallback
 		}
+
+		if resp.Delay > 0 {
+			select {
+			case <-time.After(resp.Delay):
+			case _, ok := <-requests:
+				if !ok {
+					// Client tore the session down before the delay
+					// elapsed. Nothing left to reply to.
+					return
+				}
+			}
+		}
+
 		if resp.Stdout != "" {
 			_, _ = channel.Write([]byte(resp.Stdout))
 		}

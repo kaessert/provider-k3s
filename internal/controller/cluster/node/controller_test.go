@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/pkg/errors"
@@ -29,6 +30,11 @@ import (
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/cluster/v1alpha1"
 )
+
+// testNodeRoleAgent is the Role value shared by every test fixture in this
+// file. Named as a constant (rather than repeating the literal) to keep the
+// duplicate-string linter from flagging the fixtures as needing dedup.
+const testNodeRoleAgent = "agent"
 
 // newTestKubeClient builds a fake kube client seeded with objs, for
 // exercising persistLastAppliedNodeConfig's conflict-safe read-modify-write
@@ -46,7 +52,7 @@ func nodeParams(k3sVersion, extraArgs string) v1alpha1.NodeParameters {
 		Host:       "10.0.0.2",
 		Port:       22,
 		ClusterRef: xpv1.Reference{Name: "my-cluster"},
-		Role:       "agent",
+		Role:       testNodeRoleAgent,
 		K3sVersion: k3sVersion,
 		K3sChannel: "stable",
 		ExtraArgs:  extraArgs,
@@ -221,7 +227,7 @@ func TestObserveMinimalResponse(t *testing.T) {
 		ssh:        newTestSSHClient(t, host, port),
 		serverHost: "server.example.com",
 		nodeToken:  "the-node-token",
-		role:       "agent",
+		role:       testNodeRoleAgent,
 		kube:       newTestKubeClient(),
 	}
 	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
@@ -239,8 +245,8 @@ func TestObserveMinimalResponse(t *testing.T) {
 	if !cr.Status.AtProvider.Ready {
 		t.Error("want Ready true once the agent service reports active")
 	}
-	if cr.Status.AtProvider.Role != "agent" {
-		t.Errorf("want Role %q recorded in atProvider, got %q", "agent", cr.Status.AtProvider.Role)
+	if cr.Status.AtProvider.Role != testNodeRoleAgent {
+		t.Errorf("want Role %q recorded in atProvider, got %q", testNodeRoleAgent, cr.Status.AtProvider.Role)
 	}
 }
 
@@ -256,7 +262,7 @@ func TestDeleteServerError(t *testing.T) {
 		ssh:        newTestSSHClient(t, host, port),
 		serverHost: "server.example.com",
 		nodeToken:  "the-node-token",
-		role:       "agent",
+		role:       testNodeRoleAgent,
 		kube:       newTestKubeClient(),
 	}
 	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
@@ -270,5 +276,45 @@ func TestDeleteServerError(t *testing.T) {
 	}
 	if errors.Unwrap(err) == nil {
 		t.Error("want the error wrapped via errors.Wrap, got an unwrapped error")
+	}
+}
+
+// TestCreateReturnsPromptlyOnContextDeadline proves the fix for the
+// dangling external-create-pending wedge: a Create() whose SSH join
+// outlives the caller's context must return promptly with a wrapped
+// deadline error, not block until the remote command finishes on its own
+// schedule. Blocking past the deadline is what left the caller's context
+// already expired by the time Create tried to persist its result,
+// permanently wedging the resource.
+func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{
+		Stdout: "joined",
+		Delay:  5 * time.Second,
+	})
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: "server.example.com",
+		nodeToken:  "the-node-token",
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := e.Create(ctx, cr)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want an error when the join command outlives the context deadline")
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("want Create to return at the context deadline (~200ms), got %s -- Execute blocked for the remote command's full duration instead", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want the error to unwrap to context.DeadlineExceeded, got %q", err.Error())
 	}
 }

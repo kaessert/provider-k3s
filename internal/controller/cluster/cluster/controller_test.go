@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -274,5 +275,39 @@ func TestClusterDeleteServerError(t *testing.T) {
 	}
 	if errors.Unwrap(err) == nil {
 		t.Error("want the error wrapped via errors.Wrap, got an unwrapped error")
+	}
+}
+
+// TestCreateReturnsPromptlyOnContextDeadline proves the fix for the
+// dangling external-create-pending wedge: a Create() whose SSH install
+// outlives the caller's context must return promptly with a wrapped
+// deadline error, not block until the remote command finishes on its own
+// schedule. Blocking past the deadline is what left the caller's context
+// already expired by the time Create tried to persist its result,
+// permanently wedging the resource.
+func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{
+		Stdout: "installed",
+		Delay:  5 * time.Second,
+	})
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := e.Create(ctx, cr)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want an error when the install command outlives the context deadline")
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("want Create to return at the context deadline (~200ms), got %s -- Execute blocked for the remote command's full duration instead", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want the error to unwrap to context.DeadlineExceeded, got %q", err.Error())
 	}
 }

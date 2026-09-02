@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/feature"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
@@ -62,6 +63,23 @@ const (
 // the k3s join script does not return the server's own configuration.
 const annotationLastAppliedConfig = "k3s.crossplane.io/last-applied-node-config"
 
+// externalTimeout bounds the cumulative duration of one reconcile's calls to
+// the external API (Connect/Observe/Create/Update/Delete). Create and Update
+// block for the full duration of a k3s agent/server join over SSH -- measured
+// to take a few minutes on a resource-constrained host -- and this must cover
+// that with real margin: crossplane-runtime persists the create-result
+// annotation with the SAME reconcile context Create ran under, so a Create
+// that merely times out promptly still needs enough of that budget left
+// afterward for the write to land, or the resource wedges on a dangling
+// external-create-pending annotation with no retry.
+const externalTimeout = 10 * time.Minute
+
+// No WithCreationGracePeriod override: Create blocks until the join script
+// itself reports success, so the agent/server is already running by the
+// time Create returns -- the default 30s grace period (for APIs that are
+// merely eventually consistent after a successful create call) isn't
+// needed here.
+
 // Setup adds a controller that reconciles cluster-scoped Node managed resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.NodeGroupKind)
@@ -73,6 +91,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		})),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
+		managed.WithTimeout(externalTimeout),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))), //nolint:staticcheck // event.NewAPIRecorder still requires the legacy record.EventRecorder.
 	}
 
@@ -200,7 +219,7 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 		service = "k3s"
 	}
 
-	stdout, _, err := e.ssh.Execute("systemctl is-active " + service + " 2>/dev/null || echo inactive")
+	stdout, _, err := e.ssh.Execute(ctx, "systemctl is-active "+service+" 2>/dev/null || echo inactive")
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, "cannot check k3s status")
 	}
@@ -234,7 +253,7 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
-	_, stderr, err := e.ssh.Execute(cmd)
+	_, stderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
 		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot join k3s cluster: %s", stderr)
 	}
@@ -255,7 +274,7 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Node) (managed.ExternalUpdate, error) {
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
-	_, stderr, err := e.ssh.Execute(cmd)
+	_, stderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
 		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s node: %s", stderr)
 	}
@@ -297,7 +316,7 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 		cmd = k3s.UninstallAgentCommand()
 	}
 
-	_, stderr, err := e.ssh.Execute(cmd)
+	_, stderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
 		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", stderr)
 	}
