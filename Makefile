@@ -182,7 +182,14 @@ $(UPTEST):
 	@chmod +x $(UPTEST)
 	@$(OK) installing uptest fork $(UPTEST_FORK_REF)
 
-UPTEST_EXAMPLE_LIST ?= "examples/namespaced/node.yaml"
+# UPTEST_MANIFESTS_<RESOURCE> is the comma-separated pair of the
+# cluster-scoped and namespaced example for that resource, so
+# `make e2e.<resource>` exercises both scopes in a single uptest run.
+UPTEST_MANIFESTS_CLUSTER := examples/cluster/cluster.yaml,examples/cluster/cluster-namespaced.yaml
+UPTEST_MANIFESTS_NODE := examples/node/node.yaml,examples/node/node-namespaced.yaml
+UPTEST_MANIFESTS_CORE := $(UPTEST_MANIFESTS_CLUSTER),$(UPTEST_MANIFESTS_NODE)
+
+UPTEST_EXAMPLE_LIST ?= $(UPTEST_MANIFESTS_CORE)
 uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
 	@$(INFO) running automated tests
 	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh || $(FAIL)
@@ -196,6 +203,17 @@ local-deploy: build controlplane.up $(YQ)
 	$(OK) running locally built provider
 
 e2e: local-deploy uptest
+
+# Per-resource targets — `make e2e.<resource>` runs just that resource's
+# cluster-scoped and namespaced examples together.
+e2e.cluster: UPTEST_EXAMPLE_LIST = $(UPTEST_MANIFESTS_CLUSTER)
+e2e.cluster: e2e
+
+e2e.node: UPTEST_EXAMPLE_LIST = $(UPTEST_MANIFESTS_NODE)
+e2e.node: e2e
+
+.PHONY: e2e.cluster
+.PHONY: e2e.node
 
 # Update the submodules, such as the common build scripts.
 submodules:
