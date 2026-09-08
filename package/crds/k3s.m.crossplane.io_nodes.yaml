@@ -97,17 +97,30 @@ spec:
               forProvider:
                 description: NodeParameters are the configurable fields of a Node.
                 properties:
+                  cluster:
+                    description: |-
+                      Cluster is the resolved Kubernetes object name of the Cluster this
+                      node joins, populated from ClusterRef or ClusterSelector. Changing
+                      the resolved cluster after creation would mean leaving one cluster
+                      and joining another, which this provider does not attempt as an
+                      in-place update.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: cluster is immutable once set
+                      rule: self == oldSelf || oldSelf == ''
                   clusterRef:
                     description: |-
-                      ClusterRef is a reference to the Cluster resource this node joins.
+                      ClusterRef references the Cluster resource this node joins, by name.
+                      A namespace omitted here defaults to the Node's own namespace.
                       Required when managementPolicies allows Create or Update (see the
-                      root-level CEL rule on Node) -- Observe only needs host to address
-                      the object, per convention. Changing it after creation would mean
-                      leaving one cluster and joining another, which this provider does
-                      not attempt as an in-place update.
+                      root-level CEL rule on Node) unless clusterSelector is set instead --
+                      Observe only needs host to address the object, per convention.
                     properties:
                       name:
                         description: Name of the referenced object.
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object
                         type: string
                       policy:
                         description: Policies for referencing.
@@ -137,9 +150,52 @@ spec:
                     required:
                     - name
                     type: object
-                    x-kubernetes-validations:
-                    - message: clusterRef is immutable after creation
-                      rule: self == oldSelf
+                  clusterSelector:
+                    description: |-
+                      ClusterSelector selects the Cluster resource this node joins, by
+                      label match. A namespace omitted here defaults to the Node's own
+                      namespace.
+                    properties:
+                      matchControllerRef:
+                        description: |-
+                          MatchControllerRef ensures an object with the same controller reference
+                          as the selecting object is selected.
+                        type: boolean
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: MatchLabels ensures an object with matching labels
+                          is selected.
+                        type: object
+                      namespace:
+                        description: Namespace for the selector
+                        type: string
+                      policy:
+                        description: Policies for selection.
+                        properties:
+                          resolution:
+                            default: Required
+                            description: |-
+                              Resolution specifies whether resolution of this reference is required.
+                              The default is 'Required', which means the reconcile will fail if the
+                              reference cannot be resolved. 'Optional' means this reference will be
+                              a no-op if it cannot be resolved.
+                            enum:
+                            - Required
+                            - Optional
+                            type: string
+                          resolve:
+                            description: |-
+                              Resolve specifies when this reference should be resolved. The default
+                              is 'IfNotPresent', which will attempt to resolve the reference only when
+                              the corresponding field is not present. Use 'Always' to resolve the
+                              reference on every reconcile.
+                            enum:
+                            - Always
+                            - IfNotPresent
+                            type: string
+                        type: object
+                    type: object
                   extraArgs:
                     description: ExtraArgs are additional arguments passed to k3s.
                     type: string
@@ -376,11 +432,12 @@ spec:
         - spec
         type: object
         x-kubernetes-validations:
-        - message: clusterRef is required when managementPolicies allows Create or
-            Update
+        - message: clusterRef or clusterSelector is required when managementPolicies
+            allows Create or Update
           rule: '!has(self.spec) || !has(self.spec.managementPolicies) || !(''*''
             in self.spec.managementPolicies || ''Create'' in self.spec.managementPolicies
-            || ''Update'' in self.spec.managementPolicies) || has(self.spec.forProvider.clusterRef)'
+            || ''Update'' in self.spec.managementPolicies) || has(self.spec.forProvider.clusterRef)
+            || has(self.spec.forProvider.clusterSelector)'
         - message: role is required when managementPolicies allows Create or Update
           rule: '!has(self.spec) || !has(self.spec.managementPolicies) || !(''*''
             in self.spec.managementPolicies || ''Create'' in self.spec.managementPolicies
