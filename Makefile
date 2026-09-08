@@ -323,6 +323,20 @@ e2e.node:
 .PHONY: e2e.node
 .PHONY: e2e.node-delete-order
 
+# Generate registration files from directory structure.
+# Produces apis/zz_generated_register.go and
+# internal/controller/zz_generated_register.go.
+generate-registration:
+	@$(INFO) generating registration files
+	@go run hack/generate-registration.go $(PROJECT_REPO) || $(FAIL)
+	@$(OK) generating registration files
+
+# Wire generate-registration into the generate chain so it runs alongside
+# go.generate (controller-gen deepcopy + CRD generation).
+generate.run: generate-registration
+
+.PHONY: generate-registration
+
 # Update the submodules, such as the common build scripts.
 submodules:
 	@git submodule sync

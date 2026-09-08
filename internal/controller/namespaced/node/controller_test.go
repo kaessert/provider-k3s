@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -70,7 +70,7 @@ func nodeParams(k3sVersion, extraArgs string) v1alpha1.NodeParameters {
 	return v1alpha1.NodeParameters{
 		Host:       "10.0.0.2",
 		Port:       22,
-		ClusterRef: &xpv1.Reference{Name: "my-cluster"},
+		ClusterRef: &xpv2.Reference{Name: "my-cluster"},
 		Role:       testNodeRoleAgent,
 		K3sVersion: k3sVersion,
 		K3sChannel: "stable",
@@ -154,7 +154,7 @@ func TestIsUpToDateIgnoresImmutableField(t *testing.T) {
 	// comparison itself does not depend on them.
 	cr.Spec.ForProvider.Role = "server"
 	cr.Spec.ForProvider.Host = "10.0.0.99"
-	cr.Spec.ForProvider.ClusterRef = &xpv1.Reference{Name: "someone-elses-cluster"}
+	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "someone-elses-cluster"}
 
 	upToDate, err := nodeIsUpToDate(cr)
 	if err != nil {

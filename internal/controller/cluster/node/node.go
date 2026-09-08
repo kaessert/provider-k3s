@@ -37,7 +37,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/statemetrics"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/cluster/v1alpha1"
 	sshclient "github.com/crossplane-contrib/provider-k3s/internal/clients/ssh"
@@ -313,9 +313,9 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 	// prior pass (an Update-driven restart, or a flapping unit, can revisit
 	// this path after Available was already set once).
 	if ready {
-		cr.SetConditions(xpv1.Available())
+		cr.SetConditions(xpv2.Available())
 	} else {
-		cr.SetConditions(xpv1.Creating())
+		cr.SetConditions(xpv2.Creating())
 	}
 
 	// The k3s join script reports no live configuration of its own, so the
@@ -389,7 +389,7 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 		return managed.ExternalCreation{}, e.clusterErr
 	}
 
-	cr.SetConditions(xpv1.Creating())
+	cr.SetConditions(xpv2.Creating())
 
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
@@ -457,7 +457,7 @@ func joinParamsFor(p v1alpha1.NodeParameters, serverHost, nodeToken string) k3s.
 }
 
 func (e *external) Delete(ctx context.Context, cr *v1alpha1.Node) (managed.ExternalDelete, error) {
-	cr.SetConditions(xpv1.Deleting())
+	cr.SetConditions(xpv2.Deleting())
 
 	var cmd string
 	if cr.Spec.ForProvider.Role == "server" {
