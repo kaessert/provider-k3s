@@ -107,6 +107,31 @@ CROSSPLANE_NAMESPACE = crossplane-system
 -include build/makelib/local.xpkg.mk
 -include build/makelib/controlplane.mk
 
+# uptest fork — carries sidecar-annotation support (harness annotations read
+# from a `<manifest>.yaml.uptest` file beside each example instead of inline),
+# required the moment any example manifest ships a sidecar: the upstream
+# binary k8s_tools.mk pins renders a migrated tree with zero hooks and zero
+# annotations at exit 0, so E2E would assert nothing while reporting green.
+#
+# k8s_tools.mk's own $(TOOLS_HOST_DIR)/uptest-$(UPTEST_VERSION) recipe stays
+# untouched — overriding UPTEST_VERSION alone 404s, because its download rule
+# hardcodes the upstream org. This block instead points UPTEST at a NEW
+# filename under the same $(TOOLS_HOST_DIR) and supplies its own download
+# recipe for that filename, so the two never collide on one make target.
+# $(TOOLS_HOST_DIR) is hardlinked from a shared cross-worktree tool cache —
+# reusing the stock uptest-$(UPTEST_VERSION) path here would swap the binary
+# under every other worktree's concurrently-running E2E.
+UPTEST_FORK_REPO := kaessert/uptest
+UPTEST_FORK_REF  := v2.3.0-fork.e21896e
+UPTEST           := $(TOOLS_HOST_DIR)/uptest-fork-$(UPTEST_FORK_REF)
+
+$(UPTEST):
+	@$(INFO) installing uptest fork $(UPTEST_FORK_REF)
+	@mkdir -p $(TOOLS_HOST_DIR)
+	@curl -fsSLo $(UPTEST) https://github.com/$(UPTEST_FORK_REPO)/releases/download/$(UPTEST_FORK_REF)/uptest_$(SAFEHOSTPLATFORM) || $(FAIL)
+	@chmod +x $(UPTEST)
+	@$(OK) installing uptest fork $(UPTEST_FORK_REF)
+
 UPTEST_EXAMPLE_LIST ?= "examples/namespaced/node.yaml"
 uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
 	@$(INFO) running automated tests
