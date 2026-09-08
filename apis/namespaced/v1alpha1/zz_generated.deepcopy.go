@@ -10,7 +10,7 @@ package v1alpha1
 
 import (
 	"github.com/crossplane-contrib/provider-k3s/apis/common/driftdetection"
-	v2 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	"github.com/crossplane/crossplane/apis/v2/core/v2"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
