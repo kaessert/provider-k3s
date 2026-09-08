@@ -1,9 +1,41 @@
 # ====================================================================================
 # Setup Project
+
+# Force -mod=readonly regardless of what an ambient GOFLAGS carries. Without
+# this, an inherited GOFLAGS=-mod=mod causes `go tool` invocations later in the
+# generate pipeline (goimports resolution walks the full module graph) to
+# rewrite go.sum with hashes the pruned file legitimately omits, so
+# `make check-diff` fails on a tree nobody edited. -mod=readonly is already
+# Go's default; forcing it changes nothing in a correct environment and denies
+# a hostile one the ability to rewrite a committed artifact. Any unrelated
+# ambient GOFLAGS value is preserved via the filter-out.
+export GOFLAGS := -mod=readonly $(filter-out -mod=%,$(GOFLAGS))
+
 PROJECT_NAME := provider-k3s
+# UP_ORG is the GitHub org this project is published under -- the same org the
+# module path, PROJECT_REPO and the xpkg registry org (below) all name. It is
+# a recorded fact, not derived from PROJECT_NAME.
+UP_ORG ?= crossplane-contrib
 PROJECT_REPO := github.com/crossplane-contrib/$(PROJECT_NAME)
 
 PLATFORMS ?= linux_amd64 linux_arm64
+
+# build/makelib/common.mk derives VERSION by testing whether `git tag` returns
+# anything at all -- an existence check, not a reachability check. A tag that
+# is not an ancestor of HEAD (the normal state on a release-X.Y maintenance
+# branch once a patch tag has landed there instead of on main) takes the
+# `git describe --tags` branch, which cannot describe HEAD, falls back to
+# `--always`, and yields a bare SHA instead of a semver string -- which then
+# breaks xpkg packaging downstream. This guard reproduces common.mk's own
+# tagless derivation whenever no *reachable* tag exists, so VERSION never
+# silently becomes a bare SHA. It must stay immediately before the include:
+# common.mk only computes VERSION when $(origin VERSION) is still "undefined".
+ifeq ($(origin VERSION), undefined)
+ifeq ($(shell git describe --tags --abbrev=0 2>/dev/null),)
+VERSION := $(shell echo "v0.0.0-$$(git rev-list HEAD --count)-g$$(git describe --dirty --always)" | sed 's/-/./2' | sed 's/-/./2' | sed 's/-/./2')
+endif
+endif
+
 -include build/makelib/common.mk
 
 # ====================================================================================
@@ -44,6 +76,15 @@ XPKG_REG_ORGS ?= xpkg.upbound.io/crossplane-contrib
 XPKG_REG_ORGS_NO_PROMOTE ?= xpkg.upbound.io/crossplane-contrib
 XPKGS = provider-k3s
 -include build/makelib/xpkg.mk
+
+BASE_REF ?= origin/main
+
+check-breaking-changes: ## Fail if a changed CRD reshapes a served schema incompatibly
+	@BASE_REF=$(BASE_REF) ./hack/check-breaking-changes.sh
+
+reviewable: check-breaking-changes
+
+.PHONY: check-breaking-changes
 
 # NOTE(hasheddan): we force image building to happen prior to xpkg build so that
 # we ensure image is present in daemon.
