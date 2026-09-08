@@ -398,7 +398,7 @@ func TestObserveInstalledButNotRunningIsNotResourceNotFound(t *testing.T) {
 			if cr.Status.AtProvider.Ready {
 				t.Errorf("want Ready false: ActiveState is %q, not active", activeState)
 			}
-			if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+			if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason != xpv2.ReasonCreating {
 				t.Errorf("want Creating condition set while not ready, got reason %q", cond.Reason)
 			}
 		})
@@ -436,10 +436,10 @@ func TestObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	if cr.Status.AtProvider.Ready {
 		t.Error("want Ready false: the service has not reported active yet")
 	}
-	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason == xpv1.ReasonAvailable {
+	if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason == xpv2.ReasonAvailable {
 		t.Error("want no Available condition set while the service is still converging")
 	}
-	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+	if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason != xpv2.ReasonCreating {
 		t.Errorf("want Creating condition explicitly set while converging, got reason %q", cond.Reason)
 	}
 }

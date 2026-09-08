@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -293,10 +293,10 @@ func TestNamespacedObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	if cr.Status.AtProvider.Ready {
 		t.Error("want Ready false: the service has not reported active yet")
 	}
-	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason == xpv1.ReasonAvailable {
+	if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason == xpv2.ReasonAvailable {
 		t.Error("want no Available condition set while the service is still converging")
 	}
-	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+	if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason != xpv2.ReasonCreating {
 		t.Errorf("want Creating condition explicitly set while converging, got reason %q", cond.Reason)
 	}
 }
@@ -442,7 +442,7 @@ func TestNamespacedObserveInstalledButNotRunningIsNotResourceNotFound(t *testing
 			if cr.Status.AtProvider.Ready {
 				t.Errorf("want Ready false: ActiveState is %q, not active", activeState)
 			}
-			if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+			if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason != xpv2.ReasonCreating {
 				t.Errorf("want Creating condition set while not ready, got reason %q", cond.Reason)
 			}
 		})

@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,10 +40,10 @@ func newTestProviderConfig(name, secretName string) *v1alpha1.ProviderConfig {
 	pc.Spec = v1alpha1.ProviderConfigSpec{
 		Username: "test",
 		Credentials: v1alpha1.ProviderCredentials{
-			Source: xpv1.CredentialsSourceSecret,
-			CommonCredentialSelectors: xpv1.CommonCredentialSelectors{
-				SecretRef: &xpv1.SecretKeySelector{
-					SecretReference: xpv1.SecretReference{Name: secretName, Namespace: "crossplane-system"},
+			Source: xpv2.CredentialsSourceSecret,
+			CommonCredentialSelectors: xpv2.CommonCredentialSelectors{
+				SecretRef: &xpv2.SecretKeySelector{
+					SecretReference: xpv2.SecretReference{Name: secretName, Namespace: "crossplane-system"},
 					Key:             "password",
 				},
 			},
@@ -68,7 +68,7 @@ func newTestClusterWithConnSecret(name, host, connSecretName string) (*v1alpha1.
 	cluster.SetName(name)
 	cluster.Spec.ForProvider.Host = host
 	cluster.Spec.ForProvider.Port = 22
-	cluster.Spec.WriteConnectionSecretToReference = &xpv1.SecretReference{Name: connSecretName, Namespace: "crossplane-system"}
+	cluster.Spec.WriteConnectionSecretToReference = &xpv2.SecretReference{Name: connSecretName, Namespace: "crossplane-system"}
 
 	connSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: connSecretName, Namespace: "crossplane-system"},
@@ -95,8 +95,8 @@ func TestConnectSuccess(t *testing.T) {
 	cr.SetUID(types.UID("test-uid"))
 	cr.Spec.ForProvider.Host = sshHost
 	cr.Spec.ForProvider.Port = sshPort
-	cr.Spec.ForProvider.ClusterRef = &xpv1.Reference{Name: "my-cluster"}
-	cr.SetProviderConfigReference(&xpv1.Reference{Name: "test-pc"})
+	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "my-cluster"}
+	cr.SetProviderConfigReference(&xpv2.Reference{Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewLegacyProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -117,7 +117,7 @@ func TestConnectProviderConfigNotFound(t *testing.T) {
 
 	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
 	cr.SetUID(types.UID("test-uid"))
-	cr.SetProviderConfigReference(&xpv1.Reference{Name: "missing-pc"})
+	cr.SetProviderConfigReference(&xpv2.Reference{Name: "missing-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewLegacyProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -188,7 +188,7 @@ func TestConnectClusterRefOptionalForObserve(t *testing.T) {
 	cr.Spec.ForProvider.Host = sshHost
 	cr.Spec.ForProvider.Port = sshPort
 	cr.Spec.ForProvider.ClusterRef = nil // legal: Observe-only adoption
-	cr.SetProviderConfigReference(&xpv1.Reference{Name: "test-pc"})
+	cr.SetProviderConfigReference(&xpv2.Reference{Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewLegacyProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
