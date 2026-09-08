@@ -396,6 +396,9 @@ func TestObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason == xpv1.ReasonAvailable {
 		t.Error("want no Available condition set while the service is still converging")
 	}
+	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+		t.Errorf("want Creating condition explicitly set while converging, got reason %q", cond.Reason)
+	}
 }
 
 // TestObserveServerError (T4) proves an SSH transport failure is surfaced

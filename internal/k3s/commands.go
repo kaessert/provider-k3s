@@ -45,6 +45,15 @@ type JoinParams struct {
 }
 
 // InstallCommand builds the k3s server install command string.
+//
+// Like JoinCommand (see its doc comment for the full mechanism), this skips
+// the install script's own blocking `systemctl restart` -- which, under the
+// unit's Type=notify, waits for the server to actually finish starting --
+// and issues a non-blocking restart itself instead. Without this, a single
+// blocked SSH call on a resource-constrained host can consume nearly the
+// entire external-call budget on its own, leaving Observe's poll loop no
+// chance to see incremental progress and Create/Update no budget left to
+// persist their result.
 func InstallCommand(params InstallParams) string {
 	envParts := make([]string, 0, 2)
 
@@ -80,7 +89,13 @@ func InstallCommand(params InstallParams) string {
 	// Version specification
 	envParts = append(envParts, versionEnv(params.K3sVersion, params.K3sChannel)...)
 
-	return fmt.Sprintf("curl -sfL https://get.k3s.io | %s sh -", strings.Join(envParts, " "))
+	// See the doc comment above: skip the install script's own blocking
+	// restart and issue a non-blocking one ourselves.
+	envParts = append(envParts, "INSTALL_K3S_SKIP_START='true'")
+
+	install := fmt.Sprintf("curl -sfL https://get.k3s.io | %s sh -", strings.Join(envParts, " "))
+
+	return install + " && " + nonBlockingRestartCommand(ServiceNameForRole("server"))
 }
 
 // JoinCommand builds the k3s agent/server join command string.

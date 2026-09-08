@@ -21,6 +21,81 @@ import (
 	"testing"
 )
 
+// TestInstallCommandSkipsBlockingStart mirrors
+// TestJoinCommandSkipsBlockingStart for the Cluster server install: the
+// piped install script must be told to skip its own blocking `systemctl
+// restart` (Type=notify waits for the server to actually finish starting)
+// so the SSH call returns promptly instead of consuming the whole
+// external-call budget on a resource-constrained host.
+func TestInstallCommandSkipsBlockingStart(t *testing.T) {
+	got := InstallCommand(InstallParams{})
+
+	if !strings.Contains(got, "INSTALL_K3S_SKIP_START='true'") {
+		t.Errorf("want INSTALL_K3S_SKIP_START='true' in the piped install command, got %q", got)
+	}
+}
+
+// TestInstallCommandQueuesNonBlockingRestart mirrors
+// TestJoinCommandQueuesNonBlockingRestart: the install command chains its
+// own non-blocking restart of the "k3s" server unit after the (now
+// non-blocking) install script, using --no-block so the SSH call does not
+// wait for the unit to report ready.
+func TestInstallCommandQueuesNonBlockingRestart(t *testing.T) {
+	got := InstallCommand(InstallParams{})
+
+	wantRestart := "systemctl restart k3s --no-block"
+	if !strings.Contains(got, wantRestart) {
+		t.Errorf("want %q chained onto the install command, got %q", wantRestart, got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(got), "'") {
+		t.Errorf("want the restart wrapped in its own sh -c so sudo fallback is scoped to it, got %q", got)
+	}
+}
+
+// TestInstallCommandRestartFallsBackToSudo mirrors
+// TestJoinCommandRestartFallsBackToSudo: the appended restart command
+// mirrors get.k3s.io's own root-detection idiom rather than assuming either
+// passwordless root or a sudo-capable user unconditionally.
+func TestInstallCommandRestartFallsBackToSudo(t *testing.T) {
+	got := InstallCommand(InstallParams{})
+
+	if !strings.Contains(got, `[ "$(id -u)" = 0 ]`) {
+		t.Errorf("want a root-uid check guarding the sudo fallback, got %q", got)
+	}
+	if !strings.Contains(got, "SUDO=sudo") {
+		t.Errorf("want a sudo fallback for a non-root SSH user, got %q", got)
+	}
+}
+
+// TestInstallCommandStillCarriesExecFlags proves the non-blocking-start
+// change did not disturb the existing INSTALL_K3S_EXEC construction: every
+// server flag is still present in the piped install command.
+func TestInstallCommandStillCarriesExecFlags(t *testing.T) {
+	got := InstallCommand(InstallParams{
+		TLSSAN:            "cluster.example.com",
+		ClusterInit:       true,
+		DatastoreEndpoint: "etcd://localhost:2379",
+		DisableTraefik:    true,
+		DisableServiceLB:  true,
+		ExtraArgs:         "--node-label foo=bar",
+		K3sVersion:        "v1.28.2+k3s1",
+	})
+
+	for _, want := range []string{
+		"--tls-san cluster.example.com",
+		"--cluster-init",
+		"--datastore-endpoint etcd://localhost:2379",
+		"--disable traefik",
+		"--disable servicelb",
+		"--node-label foo=bar",
+		"INSTALL_K3S_VERSION='v1.28.2+k3s1'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("want %q present in the install command, got %q", want, got)
+		}
+	}
+}
+
 // TestJoinCommandSkipsBlockingStart proves the fix for the near-timeout
 // Create()/Update() wedge: the piped install script must be told to skip
 // its own blocking `systemctl restart` (which under the unit's default

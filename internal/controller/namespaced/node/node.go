@@ -311,13 +311,16 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 
 	versionOut, _, _ := e.ssh.Execute(ctx, "k3s --version 2>/dev/null | head -1")
 
-	// Only the fully-ready state is worth telling Crossplane about: Create
-	// and Update return as soon as the restart is queued (see
+	// Create and Update return as soon as the restart is queued (see
 	// k3s.JoinCommand's doc comment), so a ServiceConverging read here is a
-	// restart genuinely still in flight, not a signal to leave a stale
-	// Available condition in place from a prior pass.
+	// restart genuinely still in flight -- report Creating() explicitly
+	// rather than leaving a stale Available condition in place from a
+	// prior pass (an Update-driven restart, or a flapping unit, can revisit
+	// this path after Available was already set once).
 	if ready {
 		cr.SetConditions(xpv1.Available())
+	} else {
+		cr.SetConditions(xpv1.Creating())
 	}
 
 	// The k3s join script reports no live configuration of its own, so the

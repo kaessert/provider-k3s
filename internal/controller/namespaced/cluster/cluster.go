@@ -63,20 +63,28 @@ const annotationLastAppliedConfig = "k3s.crossplane.io/last-applied-cluster-conf
 
 // externalTimeout bounds the cumulative duration of one reconcile's calls to
 // the external API (Connect/Observe/Create/Update/Delete). Create and Update
-// block for the full duration of a k3s server install over SSH -- measured
-// to take a few minutes on a resource-constrained host -- and this must cover
-// that with real margin: crossplane-runtime persists the create-result
-// annotation with the SAME reconcile context Create ran under, so a Create
-// that merely times out promptly still needs enough of that budget left
-// afterward for the write to land, or the resource wedges on a dangling
+// dispatch the k3s server install over SSH and return as soon as the
+// install script has skipped its own blocking restart and queued a
+// non-blocking one instead (see k3s.InstallCommand's doc comment) rather
+// than blocking until the server is actually ready, so this budget no
+// longer has to cover the full install duration -- only the SSH round trip
+// needed to install the binary, write the systemd unit and queue the
+// restart. The margin here is deliberately generous rather than trimmed
+// tight: crossplane-runtime persists the create-result annotation with the
+// SAME reconcile context Create ran under, so a Create that merely times
+// out promptly still needs enough of that budget left afterward for the
+// write to land, or the resource wedges on a dangling
 // external-create-pending annotation with no retry.
 const externalTimeout = 10 * time.Minute
 
-// No WithCreationGracePeriod override: Create blocks until the install
-// script itself reports success, so the k3s server is already running by
-// the time Create returns -- the default 30s grace period (for APIs that
-// are merely eventually consistent after a successful create call) isn't
-// needed here.
+// No WithCreationGracePeriod override: Create no longer blocks until the
+// server is ready (see k3s.InstallCommand's doc comment) -- it returns once
+// the restart is queued on the host, so the resource genuinely may not
+// exist yet, from the external API's point of view, when the immediate
+// post-create Observe runs. That is not a problem the grace period exists
+// to paper over: Observe's systemctl probe reports it as ServiceConverging
+// (exists, not yet ready) rather than absent, so no spurious re-Create
+// follows regardless of how soon that first Observe lands.
 
 // External-Name Strategy
 //
@@ -247,9 +255,11 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.E
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, "cannot check k3s status")
 	}
-	if stdout != "active" {
+	state := k3s.ClassifyServiceState(stdout)
+	if state == k3s.ServiceNotFound {
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
+	ready := state == k3s.ServiceActive
 
 	versionOut, _, _ := e.ssh.Execute(ctx, "k3s --version 2>/dev/null | head -1")
 
@@ -260,7 +270,18 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.E
 		kubeconfig = k3s.RewriteKubeconfig(kubeconfig, e.host)
 	}
 
-	cr.SetConditions(xpv1.Available())
+	// Create and Update now return as soon as the install script's restart
+	// is queued (see k3s.InstallCommand's doc comment), so a
+	// ServiceConverging read here is a restart genuinely still in flight --
+	// report Creating() explicitly rather than leaving a stale Available
+	// condition in place from a prior pass (an Update-driven restart, or a
+	// flapping unit, can revisit this path after Available was already set
+	// once).
+	if ready {
+		cr.SetConditions(xpv1.Available())
+	} else {
+		cr.SetConditions(xpv1.Creating())
+	}
 
 	// The k3s install script reports no live configuration of its own, so
 	// the last-applied-config annotation is this provider's only source
@@ -274,7 +295,7 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.E
 	}
 
 	cr.Status.AtProvider = v1alpha1.ClusterObservation{
-		Ready:             true,
+		Ready:             ready,
 		Host:              cr.Spec.ForProvider.Host,
 		Port:              cr.Spec.ForProvider.Port,
 		K3sVersion:        versionOut,
@@ -299,16 +320,6 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.E
 		return managed.ExternalObservation{}, err
 	}
 
-	connDetails := managed.ConnectionDetails{
-		"endpoint": []byte(fmt.Sprintf("https://%s:6443", e.host)),
-	}
-	if kubeconfig != "" {
-		connDetails["kubeconfig"] = []byte(kubeconfig)
-	}
-	if nodeToken != "" {
-		connDetails["node-token"] = []byte(nodeToken)
-	}
-
 	return managed.ExternalObservation{
 		ResourceExists:   true,
 		ResourceUpToDate: upToDate,
@@ -318,8 +329,26 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.E
 		// script returns no other configuration this provider could adopt
 		// into spec.
 		ResourceLateInitialized: false,
-		ConnectionDetails:       connDetails,
+		ConnectionDetails:       clusterConnectionDetails(e.host, kubeconfig, nodeToken),
 	}, nil
+}
+
+// clusterConnectionDetails builds the connection secret payload from the
+// endpoint (always known) plus whichever of kubeconfig and node-token were
+// actually readable this pass -- both come back empty on a host where sudo
+// access is unavailable, or while the server is still converging and has
+// not written those files yet.
+func clusterConnectionDetails(host, kubeconfig, nodeToken string) managed.ConnectionDetails {
+	connDetails := managed.ConnectionDetails{
+		"endpoint": []byte(fmt.Sprintf("https://%s:6443", host)),
+	}
+	if kubeconfig != "" {
+		connDetails["kubeconfig"] = []byte(kubeconfig)
+	}
+	if nodeToken != "" {
+		connDetails["node-token"] = []byte(nodeToken)
+	}
+	return connDetails
 }
 
 func (e *external) Create(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalCreation, error) {
