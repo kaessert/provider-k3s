@@ -38,6 +38,10 @@ import (
 // duplicate-string linter from flagging the fixtures as needing dedup.
 const testNodeRoleAgent = "agent"
 
+// testIsActiveCmd is the exact systemctl probe Observe sends for an agent
+// role, shared across every fixture that keys a canned SSH response on it.
+const testIsActiveCmd = "systemctl is-active k3s-agent 2>/dev/null || echo inactive"
+
 // testServerHost and testNodeToken are the connector-resolved cluster
 // identity shared by every test fixture in this file (the values Connect
 // would have produced from resolveClusterInfo).
@@ -233,7 +237,7 @@ func TestJoinParamsCarriesMutableFieldsAndResolvedIdentity(t *testing.T) {
 // ExternalObservation.
 func TestObserveMinimalResponse(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		"systemctl is-active k3s-agent 2>/dev/null || echo inactive": {Stdout: "active"},
+		testIsActiveCmd: {Stdout: "active"},
 	}, sshResponse{})
 
 	e := &external{
@@ -332,11 +336,12 @@ func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
 	}
 }
 
-// TestObserveNotFound (T3) proves the systemctl probe reporting anything
-// but "active" is treated as absence, not an error.
+// TestObserveNotFound (T3) proves the systemctl probe reporting a
+// genuinely-not-running state ("inactive") is treated as absence, not an
+// error.
 func TestObserveNotFound(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		"systemctl is-active k3s-agent 2>/dev/null || echo inactive": {Stdout: "inactive"},
+		testIsActiveCmd: {Stdout: "inactive"},
 	}, sshResponse{})
 
 	e := &external{
@@ -354,6 +359,42 @@ func TestObserveNotFound(t *testing.T) {
 	}
 	if obs.ResourceExists {
 		t.Error("want ResourceExists false: the agent service reports inactive")
+	}
+}
+
+// TestObserveConvergingIsNotResourceNotFound proves the fix for the
+// near-timeout Create()/Update() wedge: Create/Update now return as soon as
+// the join's restart is queued rather than blocking until the agent/server
+// reports ready, so Observe must be able to see the service still starting
+// ("activating") without treating that as absence -- misreporting it as
+// ResourceExists: false would make crossplane-runtime call Create() again
+// on top of an install already in flight.
+func TestObserveConvergingIsNotResourceNotFound(t *testing.T) {
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		testIsActiveCmd: {Stdout: "activating"},
+	}, sshResponse{})
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+
+	obs, err := e.Observe(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.ResourceExists {
+		t.Error("want ResourceExists true: a restart in flight is not absence")
+	}
+	if cr.Status.AtProvider.Ready {
+		t.Error("want Ready false: the service has not reported active yet")
+	}
+	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason == xpv1.ReasonAvailable {
+		t.Error("want no Available condition set while the service is still converging")
 	}
 }
 
@@ -400,8 +441,8 @@ func TestObserveSuccessPopulatesFullMirror(t *testing.T) {
 	}
 
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		"systemctl is-active k3s-agent 2>/dev/null || echo inactive": {Stdout: "active"},
-		"k3s --version 2>/dev/null | head -1":                        {Stdout: "k3s version v1.28.2+k3s1"},
+		testIsActiveCmd:                       {Stdout: "active"},
+		"k3s --version 2>/dev/null | head -1": {Stdout: "k3s version v1.28.2+k3s1"},
 	}, sshResponse{})
 
 	e := &external{
@@ -457,7 +498,7 @@ func TestObserveSuccessPopulatesFullMirror(t *testing.T) {
 // soon as Observe runs, even before the resource is confirmed to exist.
 func TestObserveSetsExternalName(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		"systemctl is-active k3s-agent 2>/dev/null || echo inactive": {Stdout: "inactive"},
+		testIsActiveCmd: {Stdout: "inactive"},
 	}, sshResponse{})
 
 	e := &external{

@@ -84,6 +84,26 @@ func InstallCommand(params InstallParams) string {
 }
 
 // JoinCommand builds the k3s agent/server join command string.
+//
+// The install script this pipes into (get.k3s.io) creates a systemd unit
+// with Type=notify and TimeoutStartSec=0, and -- unless told to skip it --
+// starts that unit itself with a plain `systemctl restart`, which under
+// Type=notify BLOCKS until the k3s process itself calls sd_notify(READY=1):
+// that is, until the agent/server has actually finished joining and is
+// fully serving, not merely until the process has been launched. On a
+// resource-constrained host that wait measured close to the entire
+// reconcile external-call budget, so a single blocked SSH session consumed
+// nearly the whole timeout on its own, leaving Observe's own poll loop no
+// chance to see incremental progress.
+//
+// INSTALL_K3S_SKIP_START tells the install script to stop short of that
+// blocking restart -- the binary, systemd unit and environment file are
+// still written -- and the command chains its own non-blocking restart
+// (systemctl ... --no-block) afterward, which returns as soon as the
+// restart job is queued rather than waiting for it to finish. The unit's
+// Type=notify is untouched, so `systemctl is-active` still only reports
+// "active" once the agent/server is genuinely ready -- Observe's poll loop
+// sees "activating" in the meantime instead of a blocked SSH call.
 func JoinCommand(params JoinParams) string {
 	var envParts []string
 
@@ -114,7 +134,77 @@ func JoinCommand(params JoinParams) string {
 	// Version specification
 	envParts = append(envParts, versionEnv(params.K3sVersion, params.K3sChannel)...)
 
-	return fmt.Sprintf("curl -sfL https://get.k3s.io | %s sh -", strings.Join(envParts, " "))
+	// See the doc comment above: skip the install script's own blocking
+	// restart and issue a non-blocking one ourselves.
+	envParts = append(envParts, "INSTALL_K3S_SKIP_START='true'")
+
+	install := fmt.Sprintf("curl -sfL https://get.k3s.io | %s sh -", strings.Join(envParts, " "))
+
+	return install + " && " + nonBlockingRestartCommand(ServiceNameForRole(params.Role))
+}
+
+// ServiceNameForRole returns the systemd unit name get.k3s.io derives for a
+// join of the given role, mirroring its own setup_env logic: joining as an
+// additional "server" resolves CMD_K3S to "server", giving SYSTEM_NAME
+// "k3s" (the same unit name as the original cluster server); anything else
+// resolves to the "agent" default, giving SYSTEM_NAME "k3s-agent". Exported
+// so Observe's own systemctl probe uses the exact same mapping Create and
+// Update build their restart command from.
+func ServiceNameForRole(role string) string {
+	if role == "server" {
+		return "k3s"
+	}
+	return "k3s-agent"
+}
+
+// nonBlockingRestartCommand builds a `systemctl restart --no-block` for the
+// given service, falling back to sudo exactly like get.k3s.io's own $SUDO
+// detection (unless already running as root) since the install script has
+// already left the unit enabled and its environment file written -- this
+// only ever needs to trigger the start, never wait for it.
+func nonBlockingRestartCommand(service string) string {
+	return fmt.Sprintf(
+		`sh -c 'SUDO=; [ "$(id -u)" = 0 ] || SUDO=sudo; $SUDO systemctl restart %s --no-block'`,
+		service,
+	)
+}
+
+// ServiceState classifies a `systemctl is-active` reply for a k3s service
+// unit started by the non-blocking restart JoinCommand builds (see its doc
+// comment). Because that restart returns before the unit finishes starting,
+// Observe's poll loop can now see states a purely synchronous, blocking
+// restart never left it time to observe.
+type ServiceState int
+
+const (
+	// ServiceNotFound means the unit was never started at all -- "inactive",
+	// "failed", "unknown" or any other reply this provider does not
+	// recognise as part of a start/restart in flight. Treated as absence:
+	// the external resource does not exist yet (or reinstalling it is
+	// exactly the right response, per this provider's stable-external-name
+	// model).
+	ServiceNotFound ServiceState = iota
+	// ServiceConverging means a restart is in flight -- "activating",
+	// "reloading" or "deactivating" (the stop phase of a restart) -- and
+	// the unit has neither reached nor left its active state yet. The
+	// resource already exists (it must not be re-created), but is not yet
+	// ready.
+	ServiceConverging
+	// ServiceActive means the unit's own Type=notify process has reported
+	// itself ready.
+	ServiceActive
+)
+
+// ClassifyServiceState maps a `systemctl is-active` reply to a ServiceState.
+func ClassifyServiceState(stdout string) ServiceState {
+	switch stdout {
+	case "active":
+		return ServiceActive
+	case "activating", "reloading", "deactivating":
+		return ServiceConverging
+	default:
+		return ServiceNotFound
+	}
 }
 
 // UninstallServerCommand returns the k3s server uninstall command.

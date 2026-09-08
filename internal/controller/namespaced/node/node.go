@@ -67,20 +67,27 @@ const annotationLastAppliedConfig = "k3s.crossplane.io/last-applied-node-config"
 
 // externalTimeout bounds the cumulative duration of one reconcile's calls to
 // the external API (Connect/Observe/Create/Update/Delete). Create and Update
-// block for the full duration of a k3s agent/server join over SSH -- measured
-// to take a few minutes on a resource-constrained host -- and this must cover
-// that with real margin: crossplane-runtime persists the create-result
-// annotation with the SAME reconcile context Create ran under, so a Create
-// that merely times out promptly still needs enough of that budget left
-// afterward for the write to land, or the resource wedges on a dangling
+// each dispatch the k3s agent/server join over SSH and return as soon as
+// the remote restart is queued (see k3s.JoinCommand's doc comment) rather
+// than blocking until the agent/server is actually ready, so this budget no
+// longer has to cover the full join duration -- only the SSH round trip
+// needed to install the binary, write the systemd unit and queue the
+// restart. The margin here is deliberately generous rather than trimmed
+// tight: crossplane-runtime persists the create-result annotation with the
+// SAME reconcile context Create ran under, so a Create that merely times
+// out promptly still needs enough of that budget left afterward for the
+// write to land, or the resource wedges on a dangling
 // external-create-pending annotation with no retry.
 const externalTimeout = 10 * time.Minute
 
-// No WithCreationGracePeriod override: Create blocks until the join script
-// itself reports success, so the agent/server is already running by the
-// time Create returns -- the default 30s grace period (for APIs that are
-// merely eventually consistent after a successful create call) isn't
-// needed here.
+// No WithCreationGracePeriod override: Create no longer blocks until the
+// agent/server is ready (see k3s.JoinCommand's doc comment) -- it returns
+// once the join is queued on the host, so the resource genuinely may not
+// exist yet, from the external API's point of view, when the immediate
+// post-create Observe runs. That is not a problem the grace period exists
+// to paper over: Observe's systemctl probe reports it as ServiceConverging
+// (exists, not yet ready) rather than absent, so no spurious re-Create
+// follows regardless of how soon that first Observe lands.
 
 // External-Name Strategy
 //
@@ -290,22 +297,28 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 		meta.SetExternalName(cr, cr.Spec.ForProvider.Host)
 	}
 
-	service := "k3s-agent"
-	if e.role == "server" {
-		service = "k3s"
-	}
+	service := k3s.ServiceNameForRole(e.role)
 
 	stdout, _, err := e.ssh.Execute(ctx, "systemctl is-active "+service+" 2>/dev/null || echo inactive")
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, "cannot check k3s status")
 	}
-	if stdout != "active" {
+	state := k3s.ClassifyServiceState(stdout)
+	if state == k3s.ServiceNotFound {
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
+	ready := state == k3s.ServiceActive
 
 	versionOut, _, _ := e.ssh.Execute(ctx, "k3s --version 2>/dev/null | head -1")
 
-	cr.SetConditions(xpv1.Available())
+	// Only the fully-ready state is worth telling Crossplane about: Create
+	// and Update return as soon as the restart is queued (see
+	// k3s.JoinCommand's doc comment), so a ServiceConverging read here is a
+	// restart genuinely still in flight, not a signal to leave a stale
+	// Available condition in place from a prior pass.
+	if ready {
+		cr.SetConditions(xpv1.Available())
+	}
 
 	// The k3s join script reports no live configuration of its own, so the
 	// last-applied-config annotation is this provider's only source for
@@ -319,7 +332,7 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 	}
 
 	cr.Status.AtProvider = v1alpha1.NodeObservation{
-		Ready:      true,
+		Ready:      ready,
 		Host:       cr.Spec.ForProvider.Host,
 		Port:       cr.Spec.ForProvider.Port,
 		Role:       e.role,
@@ -353,6 +366,11 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 	}, nil
 }
 
+// Create dispatches the k3s join over SSH and returns as soon as the
+// install completes and the restart is queued (see k3s.JoinCommand's doc
+// comment) -- it does not wait for the agent/server to actually finish
+// joining and report ready. Observe's own poll loop picks up convergence
+// from there.
 func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.ExternalCreation, error) {
 	cr.SetConditions(xpv1.Creating())
 
@@ -375,7 +393,10 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 // the flags it is given and restarts the service, so — like a whole-object
 // PUT — every field is echoed on every call, including the immutable ones
 // (host, port, clusterRef, role): CEL rejects any change to them, so their
-// value here always matches what is already running.
+// value here always matches what is already running. Like Create, this
+// returns as soon as the restart is queued rather than waiting for the
+// reconfigured agent/server to report ready again (see k3s.JoinCommand's
+// doc comment).
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Node) (managed.ExternalUpdate, error) {
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
