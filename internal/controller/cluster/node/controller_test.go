@@ -45,8 +45,9 @@ const testNodeRoleAgent = "agent"
 const testIsActiveCmd = "systemctl show -p LoadState -p ActiveState --value k3s-agent 2>/dev/null"
 
 // testServerHost and testNodeToken are the connector-resolved cluster
-// identity shared by every test fixture in this file (the values Connect
-// would have produced from resolveClusterInfo).
+// identity shared by every fixture in this file that builds an *external
+// directly (bypassing Connect) or asserts on Connect's resolved output (the
+// values Connect would have produced from resolveClusterInfo).
 const (
 	testServerHost = "server.example.com"
 	testNodeToken  = "the-node-token"
@@ -54,7 +55,9 @@ const (
 
 // newTestKubeClient builds a fake kube client seeded with objs, for
 // exercising persistLastAppliedNodeConfig's conflict-safe read-modify-write
-// against a real (fake) API server rather than an in-memory struct.
+// against a real (fake) API server rather than an in-memory struct. The
+// corev1 scheme is required alongside this provider's own types because
+// Connect() reads a referenced Cluster's connection Secret directly.
 func newTestKubeClient(objs ...client.Object) client.Client {
 	s := runtime.NewScheme()
 	if err := v1alpha1.SchemeBuilder.AddToScheme(s); err != nil {
@@ -67,9 +70,11 @@ func newTestKubeClient(objs ...client.Object) client.Client {
 }
 
 func nodeParams(k3sVersion, extraArgs string) v1alpha1.NodeParameters {
+	cluster := "my-cluster"
 	return v1alpha1.NodeParameters{
 		Host:       "10.0.0.2",
 		Port:       22,
+		Cluster:    &cluster,
 		ClusterRef: &xpv2.Reference{Name: "my-cluster"},
 		Role:       testNodeRoleAgent,
 		K3sVersion: k3sVersion,

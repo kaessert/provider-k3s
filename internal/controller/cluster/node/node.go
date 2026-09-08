@@ -119,6 +119,10 @@ const externalTimeout = 10 * time.Minute
 // reports.
 
 // Setup adds a controller that reconciles cluster-scoped Node managed resources.
+//
+// +kubebuilder:rbac:groups=k3s.crossplane.io,resources=nodes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=k3s.crossplane.io,resources=nodes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=k3s.crossplane.io,resources=clusters,verbs=get;list;watch
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.NodeGroupKind)
 
@@ -210,12 +214,16 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 		return nil, errors.Wrap(err, errNewClient)
 	}
 
-	// clusterRef is optional in the schema (required instead by a CEL rule
-	// gated on managementPolicies allowing Create or Update, per convention)
-	// so an Observe-only adoption carrying just host can pass admission.
-	// Skip resolution when it is absent: Observe never needs serverHost or
-	// nodeToken, only Create/Update do, and CEL already guarantees clusterRef
-	// is present whenever either of those can run.
+	// clusterRef/clusterSelector is optional in the schema (required instead
+	// by a CEL rule gated on managementPolicies allowing Create or Update,
+	// per convention) so an Observe-only adoption carrying just host can
+	// pass admission. The reconciler resolves ClusterRef/ClusterSelector
+	// into the Cluster value before Connect runs (Node implements
+	// ResolveReferences), so by the time Create/Update needs it resolution
+	// has already happened -- CEL already guarantees one of clusterRef or
+	// clusterSelector is present whenever either write path can run. Skip
+	// resolution when Cluster is still unset: Observe never needs
+	// serverHost or nodeToken, only Create/Update do.
 	//
 	// A resolution failure (most commonly: the referenced Cluster was
 	// deleted) must NOT fail Connect(): Observe and Delete never need
@@ -227,8 +235,8 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 	// serverHost/nodeToken -- fail loudly on it themselves.
 	var serverHost, nodeToken string
 	var clusterErr error
-	if cr.Spec.ForProvider.ClusterRef != nil {
-		serverHost, nodeToken, clusterErr = c.resolveClusterInfo(ctx, cr.Spec.ForProvider.ClusterRef.Name)
+	if cr.Spec.ForProvider.Cluster != nil && *cr.Spec.ForProvider.Cluster != "" {
+		serverHost, nodeToken, clusterErr = c.resolveClusterInfo(ctx, *cr.Spec.ForProvider.Cluster)
 	}
 
 	return &external{

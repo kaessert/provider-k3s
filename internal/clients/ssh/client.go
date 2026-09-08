@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -33,6 +34,37 @@ const (
 	errSSHSession      = "cannot create SSH session"
 	errSSHExecute      = "cannot execute SSH command"
 )
+
+// redactedPlaceholder replaces a matched secret so a redacted message still
+// names what was removed, rather than leaving a gap that reads like
+// truncation.
+const redactedPlaceholder = "[REDACTED]"
+
+// secretPatterns matches command output shapes that must never reach a
+// user-visible surface (a Kubernetes condition message, a log line, an
+// error returned up through Observe/Create/Update/Delete):
+//
+//   - PEM-encoded key/certificate material, as returned verbatim by
+//     `cat /etc/rancher/k3s/k3s.yaml` and similar commands.
+//   - k3s node/server join tokens, of the form emitted by
+//     `cat /var/lib/rancher/k3s/server/node-token`
+//     (K10<hex>::server:<token> or ::node:<token>).
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----`),
+	regexp.MustCompile(`K10[0-9a-fA-F]{20,}::(?:server|node):[0-9A-Za-z]{10,}`),
+}
+
+// redactSecrets scrubs command output of content that must never reach a
+// user-visible surface, replacing each match with a fixed placeholder. This
+// is the single choke point every Execute error path routes through --
+// individual call sites never redact for themselves, so a call site that
+// forgets cannot leak what this function already removed.
+func redactSecrets(s string) string {
+	for _, p := range secretPatterns {
+		s = p.ReplaceAllString(s, redactedPlaceholder)
+	}
+	return s
+}
 
 // Config holds SSH connection parameters.
 type Config struct {
@@ -118,10 +150,18 @@ func (c *Client) Execute(ctx context.Context, cmd string) (stdout, stderr string
 		// races with those writes.
 		_ = session.Close()
 		<-done
-		return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), errors.Wrap(ctx.Err(), errSSHExecute)
+		// Redacted: every non-nil-error return from Execute is this
+		// function's only choke point for command output that flows into
+		// a caller's wrapped error message (Create/Update/Delete format
+		// stdout/stderr straight into a condition). Redacting here, once,
+		// means no call site has to remember to -- the success path below
+		// returns output unredacted because Observe's connection-detail
+		// extraction (kubeconfig, node-token) legitimately needs the raw
+		// value on success.
+		return redactSecrets(strings.TrimSpace(stdoutBuf.String())), redactSecrets(strings.TrimSpace(stderrBuf.String())), errors.Wrap(ctx.Err(), errSSHExecute)
 	case waitErr := <-done:
 		if waitErr != nil {
-			return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), errors.Wrap(waitErr, errSSHExecute)
+			return redactSecrets(strings.TrimSpace(stdoutBuf.String())), redactSecrets(strings.TrimSpace(stderrBuf.String())), errors.Wrap(waitErr, errSSHExecute)
 		}
 		return strings.TrimSpace(stdoutBuf.String()), strings.TrimSpace(stderrBuf.String()), nil
 	}

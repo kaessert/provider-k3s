@@ -450,6 +450,47 @@ func TestClusterObserveInstalledButNotRunningIsNotResourceNotFound(t *testing.T)
 	}
 }
 
+// testInstallFailureKubeconfigPEM and testInstallFailureNodeToken are the
+// two secret shapes a failed k3s install can echo back on stderr -- a
+// kubeconfig's embedded certificate and a node-join token. Neither may
+// survive into Create's returned, user-visible condition message.
+const (
+	testInstallFailureKubeconfigPEM = "-----BEGIN CERTIFICATE-----\n" +
+		"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtestcertificatedata\n" +
+		"-----END CERTIFICATE-----"
+	testInstallFailureNodeToken = "K10a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5::server:f6e5d4c3b2a1908f7e6d5c4b3a2918070605040302010"
+)
+
+// TestCreateRedactsSecretsFromErrorMessage drives an install failure whose
+// stderr contains a PEM-encoded kubeconfig fragment and a node-token
+// through the REAL Create() error path and proves neither string survives
+// in the resulting, user-visible condition message. A redactor that merely
+// echoed its input back would also pass a test asserting only that
+// redaction was called -- this asserts on the actual returned error text.
+func TestCreateRedactsSecretsFromErrorMessage(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{
+		Stderr: "install failed while dumping diagnostics:\n" +
+			"kubeconfig=" + testInstallFailureKubeconfigPEM + "\n" +
+			"node-token=" + testInstallFailureNodeToken,
+		ExitCode: 1,
+	})
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "")
+
+	_, err := e.Create(context.Background(), cr)
+	if err == nil {
+		t.Fatal("want an error when the install command fails on the host")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, testInstallFailureKubeconfigPEM) || strings.Contains(msg, "BEGIN CERTIFICATE") {
+		t.Errorf("want the kubeconfig PEM block redacted from the condition message, got %q", msg)
+	}
+	if strings.Contains(msg, testInstallFailureNodeToken) {
+		t.Errorf("want the node token redacted from the condition message, got %q", msg)
+	}
+}
+
 // TestClusterObserveServerError (T4) proves an SSH transport failure is
 // surfaced as a wrapped error rather than swallowed or panicked -- a closed
 // connection stands in for a dropped session mid-probe.

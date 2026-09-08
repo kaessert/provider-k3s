@@ -120,6 +120,10 @@ const externalTimeout = 10 * time.Minute
 // reports.
 
 // Setup adds a controller that reconciles namespaced Node managed resources.
+//
+// +kubebuilder:rbac:groups=k3s.m.crossplane.io,resources=nodes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=k3s.m.crossplane.io,resources=nodes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=k3s.m.crossplane.io,resources=clusters,verbs=get;list;watch
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.NodeGroupKind)
 
@@ -186,32 +190,12 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 		return nil, errors.Wrap(err, errTrackPCUsage)
 	}
 
-	// Get ProviderConfig (namespaced or ClusterProviderConfig)
-	ref := cr.GetProviderConfigReference()
-
-	var pcSpec v1alpha1.ProviderConfigSpec
-	var cd v1alpha1.ProviderCredentials
-
-	switch ref.Kind {
-	case "ProviderConfig":
-		pc := &v1alpha1.ProviderConfig{}
-		if err := c.kube.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: cr.GetNamespace()}, pc); err != nil {
-			return nil, errors.Wrap(err, errGetPC)
-		}
-		pcSpec = pc.Spec
-		cd = pc.Spec.Credentials
-	case "ClusterProviderConfig":
-		cpc := &v1alpha1.ClusterProviderConfig{}
-		if err := c.kube.Get(ctx, types.NamespacedName{Name: ref.Name}, cpc); err != nil {
-			return nil, errors.Wrap(err, errGetCPC)
-		}
-		pcSpec = cpc.Spec
-		cd = cpc.Spec.Credentials
-	default:
-		return nil, errors.Errorf("unsupported provider config kind: %s", ref.Kind)
+	pcSpec, err := c.resolveProviderConfigSpec(ctx, cr)
+	if err != nil {
+		return nil, err
 	}
 
-	data, err := resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
+	data, err := resource.CommonCredentialExtractor(ctx, pcSpec.Credentials.Source, c.kube, pcSpec.Credentials.CommonCredentialSelectors)
 	if err != nil {
 		return nil, errors.Wrap(err, errGetCreds)
 	}
@@ -228,12 +212,16 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 		return nil, errors.Wrap(err, errNewClient)
 	}
 
-	// clusterRef is optional in the schema (required instead by a CEL rule
-	// gated on managementPolicies allowing Create or Update, per convention)
-	// so an Observe-only adoption carrying just host can pass admission.
-	// Skip resolution when it is absent: Observe never needs serverHost or
-	// nodeToken, only Create/Update do, and CEL already guarantees clusterRef
-	// is present whenever either of those can run.
+	// clusterRef/clusterSelector is optional in the schema (required instead
+	// by a CEL rule gated on managementPolicies allowing Create or Update,
+	// per convention) so an Observe-only adoption carrying just host can
+	// pass admission. The reconciler resolves ClusterRef/ClusterSelector
+	// into the Cluster value before Connect runs (Node implements
+	// ResolveReferences), so by the time Create/Update needs it resolution
+	// has already happened -- CEL already guarantees one of clusterRef or
+	// clusterSelector is present whenever either write path can run. Skip
+	// resolution when Cluster is still unset: Observe never needs
+	// serverHost or nodeToken, only Create/Update do.
 	//
 	// A resolution failure (most commonly: the referenced Cluster was
 	// deleted) must NOT fail Connect(): Observe and Delete never need
@@ -245,8 +233,8 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 	// serverHost/nodeToken -- fail loudly on it themselves.
 	var serverHost, nodeToken string
 	var clusterErr error
-	if cr.Spec.ForProvider.ClusterRef != nil {
-		serverHost, nodeToken, clusterErr = c.resolveClusterInfo(ctx, cr.Spec.ForProvider.ClusterRef.Name, cr.GetNamespace())
+	if cr.Spec.ForProvider.Cluster != nil && *cr.Spec.ForProvider.Cluster != "" {
+		serverHost, nodeToken, clusterErr = c.resolveClusterInfo(ctx, *cr.Spec.ForProvider.Cluster, cr.GetNamespace())
 	}
 
 	return &external{
@@ -257,6 +245,32 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 		role:       cr.Spec.ForProvider.Role,
 		kube:       c.kube,
 	}, nil
+}
+
+// resolveProviderConfigSpec fetches cr's referenced ProviderConfig, routing
+// on the reference's Kind: a plain "ProviderConfig" is looked up in cr's own
+// namespace, a "ClusterProviderConfig" is cluster-scoped and carries no
+// namespace at all. Any other Kind is rejected rather than silently
+// defaulting to one of the two supported branches.
+func (c *connector) resolveProviderConfigSpec(ctx context.Context, cr *v1alpha1.Node) (v1alpha1.ProviderConfigSpec, error) {
+	ref := cr.GetProviderConfigReference()
+
+	switch ref.Kind {
+	case "ProviderConfig":
+		pc := &v1alpha1.ProviderConfig{}
+		if err := c.kube.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: cr.GetNamespace()}, pc); err != nil {
+			return v1alpha1.ProviderConfigSpec{}, errors.Wrap(err, errGetPC)
+		}
+		return pc.Spec, nil
+	case "ClusterProviderConfig":
+		cpc := &v1alpha1.ClusterProviderConfig{}
+		if err := c.kube.Get(ctx, types.NamespacedName{Name: ref.Name}, cpc); err != nil {
+			return v1alpha1.ProviderConfigSpec{}, errors.Wrap(err, errGetCPC)
+		}
+		return cpc.Spec, nil
+	default:
+		return v1alpha1.ProviderConfigSpec{}, errors.Errorf("unsupported provider config kind: %s", ref.Kind)
+	}
 }
 
 func (c *connector) resolveClusterInfo(ctx context.Context, clusterName, namespace string) (serverHost, nodeToken string, err error) {

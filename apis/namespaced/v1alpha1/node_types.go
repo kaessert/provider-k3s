@@ -22,10 +22,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/reference"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	"github.com/crossplane-contrib/provider-k3s/apis/common/driftdetection"
 )
+
+// ClusterObjectName extracts the referenced Cluster's Kubernetes object
+// name. The generator's default reference.ExternalName() extractor would
+// instead resolve to the Cluster's external-name -- this provider looks up
+// the target Cluster by its object name (to read the Cluster's connection
+// secret), an identifier the external-name does not reliably carry.
+func ClusterObjectName() reference.ExtractValueFn {
+	return func(mg resource.Managed) string {
+		return mg.GetName()
+	}
+}
 
 // NodeParameters are the configurable fields of a Node.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.port) || has(self.port)",message="port cannot be removed once set"
@@ -46,15 +59,31 @@ type NodeParameters struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="port is immutable after creation"
 	Port int `json:"port,omitempty"`
 
-	// ClusterRef is a reference to the Cluster resource this node joins.
+	// Cluster is the resolved Kubernetes object name of the Cluster this
+	// node joins, populated from ClusterRef or ClusterSelector. Changing
+	// the resolved cluster after creation would mean leaving one cluster
+	// and joining another, which this provider does not attempt as an
+	// in-place update.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf || oldSelf == ''",message="cluster is immutable once set"
+	// +crossplane:generate:reference:type=github.com/crossplane-contrib/provider-k3s/apis/namespaced/v1alpha1.Cluster
+	// +crossplane:generate:reference:extractor=github.com/crossplane-contrib/provider-k3s/apis/namespaced/v1alpha1.ClusterObjectName()
+	Cluster *string `json:"cluster,omitempty"`
+
+	// ClusterRef references the Cluster resource this node joins, by name.
+	// A namespace omitted here defaults to the Node's own namespace.
 	// Required when managementPolicies allows Create or Update (see the
-	// root-level CEL rule on Node) -- Observe only needs host to address
-	// the object, per convention. Changing it after creation would mean
-	// leaving one cluster and joining another, which this provider does
-	// not attempt as an in-place update.
+	// root-level CEL rule on Node) unless clusterSelector is set instead --
+	// Observe only needs host to address the object, per convention.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="clusterRef is immutable after creation"
-	ClusterRef *xpv2.Reference `json:"clusterRef,omitempty"`
+	ClusterRef *xpv2.NamespacedReference `json:"clusterRef,omitempty"`
+
+	// ClusterSelector selects the Cluster resource this node joins, by
+	// label match. A namespace omitted here defaults to the Node's own
+	// namespace.
+	// +optional
+	ClusterSelector *xpv2.NamespacedSelector `json:"clusterSelector,omitempty"`
 
 	// Role is the role of this node: "agent" (worker) or "server" (additional control plane).
 	// Required when managementPolicies allows Create or Update (see the
@@ -157,7 +186,7 @@ type NodeStatus struct {
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,categories={crossplane,managed,k3s}
-// +kubebuilder:validation:XValidation:rule="!has(self.spec) || !has(self.spec.managementPolicies) || !('*' in self.spec.managementPolicies || 'Create' in self.spec.managementPolicies || 'Update' in self.spec.managementPolicies) || has(self.spec.forProvider.clusterRef)",message="clusterRef is required when managementPolicies allows Create or Update"
+// +kubebuilder:validation:XValidation:rule="!has(self.spec) || !has(self.spec.managementPolicies) || !('*' in self.spec.managementPolicies || 'Create' in self.spec.managementPolicies || 'Update' in self.spec.managementPolicies) || has(self.spec.forProvider.clusterRef) || has(self.spec.forProvider.clusterSelector)",message="clusterRef or clusterSelector is required when managementPolicies allows Create or Update"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec) || !has(self.spec.managementPolicies) || !('*' in self.spec.managementPolicies || 'Create' in self.spec.managementPolicies || 'Update' in self.spec.managementPolicies) || has(self.spec.forProvider.role)",message="role is required when managementPolicies allows Create or Update"
 type Node struct {
 	metav1.TypeMeta   `json:",inline"`
