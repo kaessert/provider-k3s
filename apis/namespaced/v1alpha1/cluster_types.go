@@ -88,11 +88,60 @@ type ClusterParameters struct {
 
 // ClusterObservation are the observable fields of a Cluster.
 type ClusterObservation struct {
+	// ID is this resource's identity, mirrored from the external-name
+	// annotation once Observe or Create has run. Uptest's import recovery
+	// test compares this against the external-name recorded before the
+	// resource's status was cleared.
+	ID string `json:"id,omitempty"`
+
 	// Ready indicates the k3s server is running.
 	Ready bool `json:"ready,omitempty"`
 
+	// Host mirrors spec.forProvider.host: the SSH target this Cluster was
+	// installed on. Immutable, so it cannot diverge from spec once the
+	// resource exists.
+	Host string `json:"host,omitempty"`
+
+	// Port mirrors spec.forProvider.port. Immutable, so it cannot diverge
+	// from spec once the resource exists.
+	Port int `json:"port,omitempty"`
+
 	// K3sVersion is the installed version reported by the server.
 	K3sVersion string `json:"k3sVersion,omitempty"`
+
+	// K3sChannel mirrors the release channel this controller most
+	// recently confirmed it applied. Empty until the first successful
+	// Create or Update: the k3s install script reports no channel of its
+	// own, so there is nothing to mirror before this controller has
+	// recorded one.
+	K3sChannel string `json:"k3sChannel,omitempty"`
+
+	// ClusterInit mirrors spec.forProvider.clusterInit. Immutable, so it
+	// cannot diverge from spec once the resource exists.
+	ClusterInit bool `json:"clusterInit,omitempty"`
+
+	// TLSSAN mirrors the TLS SAN this controller most recently confirmed
+	// it applied. Empty until the first successful Create or Update, for
+	// the same reason as k3sChannel.
+	TLSSAN string `json:"tlsSAN,omitempty"`
+
+	// DisableTraefik mirrors the value this controller most recently
+	// confirmed it applied. Empty (false) until the first successful
+	// Create or Update.
+	DisableTraefik bool `json:"disableTraefik,omitempty"`
+
+	// DisableServiceLB mirrors the value this controller most recently
+	// confirmed it applied. Empty (false) until the first successful
+	// Create or Update.
+	DisableServiceLB bool `json:"disableServiceLB,omitempty"`
+
+	// ExtraArgs mirrors the value this controller most recently confirmed
+	// it applied. Empty until the first successful Create or Update.
+	ExtraArgs string `json:"extraArgs,omitempty"`
+
+	// DatastoreEndpoint mirrors spec.forProvider.datastoreEndpoint.
+	// Immutable, so it cannot diverge from spec once the resource exists.
+	DatastoreEndpoint string `json:"datastoreEndpoint,omitempty"`
 }
 
 // A ClusterSpec defines the desired state of a Cluster.

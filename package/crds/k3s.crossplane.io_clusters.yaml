@@ -274,13 +274,72 @@ spec:
               atProvider:
                 description: ClusterObservation are the observable fields of a Cluster.
                 properties:
+                  clusterInit:
+                    description: |-
+                      ClusterInit mirrors spec.forProvider.clusterInit. Immutable, so it
+                      cannot diverge from spec once the resource exists.
+                    type: boolean
+                  datastoreEndpoint:
+                    description: |-
+                      DatastoreEndpoint mirrors spec.forProvider.datastoreEndpoint.
+                      Immutable, so it cannot diverge from spec once the resource exists.
+                    type: string
+                  disableServiceLB:
+                    description: |-
+                      DisableServiceLB mirrors the value this controller most recently
+                      confirmed it applied. Empty (false) until the first successful
+                      Create or Update.
+                    type: boolean
+                  disableTraefik:
+                    description: |-
+                      DisableTraefik mirrors the value this controller most recently
+                      confirmed it applied. Empty (false) until the first successful
+                      Create or Update.
+                    type: boolean
+                  extraArgs:
+                    description: |-
+                      ExtraArgs mirrors the value this controller most recently confirmed
+                      it applied. Empty until the first successful Create or Update.
+                    type: string
+                  host:
+                    description: |-
+                      Host mirrors spec.forProvider.host: the SSH target this Cluster was
+                      installed on. Immutable, so it cannot diverge from spec once the
+                      resource exists.
+                    type: string
+                  id:
+                    description: |-
+                      ID is this resource's identity, mirrored from the external-name
+                      annotation once Observe or Create has run. Uptest's import recovery
+                      test compares this against the external-name recorded before the
+                      resource's status was cleared.
+                    type: string
+                  k3sChannel:
+                    description: |-
+                      K3sChannel mirrors the release channel this controller most
+                      recently confirmed it applied. Empty until the first successful
+                      Create or Update: the k3s install script reports no channel of its
+                      own, so there is nothing to mirror before this controller has
+                      recorded one.
+                    type: string
                   k3sVersion:
                     description: K3sVersion is the installed version reported by the
                       server.
                     type: string
+                  port:
+                    description: |-
+                      Port mirrors spec.forProvider.port. Immutable, so it cannot diverge
+                      from spec once the resource exists.
+                    type: integer
                   ready:
                     description: Ready indicates the k3s server is running.
                     type: boolean
+                  tlsSAN:
+                    description: |-
+                      TLSSAN mirrors the TLS SAN this controller most recently confirmed
+                      it applied. Empty until the first successful Create or Update, for
+                      the same reason as k3sChannel.
+                    type: string
                 type: object
               conditions:
                 description: Conditions of the resource.
