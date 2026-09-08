@@ -301,6 +301,41 @@ func TestClusterObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	}
 }
 
+// TestClusterObserveNotReadyIsNotUpToDate is the regression test for a
+// cluster that hangs at Ready:False forever while Observe still reports it
+// up to date -- the server unit is permanently stuck loaded-but-not-active.
+// Readiness is part of desired state, not a side channel clusterIsUpToDate
+// alone can certify, so ResourceUpToDate must be false here even though the
+// last-applied configuration matches spec exactly: an unqualified
+// clusterIsUpToDate() result would report ResourceUpToDate: true, making a
+// permanently broken cluster silently indistinguishable from a healthy one
+// -- crossplane-runtime would log "external resource is up to date" every
+// poll and take no further action.
+func TestClusterObserveNotReadyIsNotUpToDate(t *testing.T) {
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	if err := persistLastAppliedClusterConfig(context.Background(), kube, cr); err != nil {
+		t.Fatalf("persistLastAppliedClusterConfig: %v", err)
+	}
+
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		testIsActiveCmd: {Stdout: "loaded\nactivating"},
+	}, sshResponse{})
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: kube}
+
+	obs, err := e.Observe(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.ResourceExists {
+		t.Error("want ResourceExists true: a not-ready unit must not be re-Created")
+	}
+	if obs.ResourceUpToDate {
+		t.Error("want ResourceUpToDate false: the unit is not ready, even though its last-applied configuration matches spec exactly")
+	}
+}
+
 // TestClusterDeleteServerError proves an uninstall failure on the host is
 // surfaced as a wrapped error from Delete, not swallowed or panicked.
 func TestClusterDeleteServerError(t *testing.T) {

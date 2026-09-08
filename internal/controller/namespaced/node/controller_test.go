@@ -444,6 +444,48 @@ func TestObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	}
 }
 
+// TestObserveNotReadyIsNotUpToDate is the regression test for a node that
+// hangs at Ready:False forever while Observe still reports it up to date --
+// the agent can never reach a server that itself never becomes ready, so the
+// unit is permanently stuck loaded-but-not-active. Readiness is part of
+// desired state, not a side channel nodeIsUpToDate alone can certify, so
+// ResourceUpToDate must be false here even though the last-applied
+// configuration matches spec exactly: an unqualified nodeIsUpToDate() result
+// would report ResourceUpToDate: true, making a permanently broken node
+// silently indistinguishable from a healthy one -- crossplane-runtime would
+// log "external resource is up to date" every poll and take no further
+// action.
+func TestObserveNotReadyIsNotUpToDate(t *testing.T) {
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	if err := persistLastAppliedNodeConfig(context.Background(), kube, cr); err != nil {
+		t.Fatalf("persistLastAppliedNodeConfig: %v", err)
+	}
+
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		testIsActiveCmd: {Stdout: "loaded\nactivating"},
+	}, sshResponse{})
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       kube,
+	}
+
+	obs, err := e.Observe(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.ResourceExists {
+		t.Error("want ResourceExists true: a not-ready unit must not be re-Created")
+	}
+	if obs.ResourceUpToDate {
+		t.Error("want ResourceUpToDate false: the unit is not ready, even though its last-applied configuration matches spec exactly")
+	}
+}
+
 // TestObserveServerError (T4) proves an SSH transport failure is surfaced
 // as a wrapped error rather than swallowed or panicked.
 func TestObserveServerError(t *testing.T) {
