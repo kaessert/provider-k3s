@@ -166,29 +166,118 @@ func TestServiceNameForRole(t *testing.T) {
 	}
 }
 
-// TestClassifyServiceState proves every systemctl is-active reply this
-// provider cares about is classified correctly, in particular that the
-// transitional states a non-blocking restart can now produce
-// (activating/reloading/deactivating) are NOT treated as absence.
-func TestClassifyServiceState(t *testing.T) {
+// LoadState and ActiveState values shared across every ServiceProbe fixture
+// below, named as constants rather than repeated literals to keep the
+// duplicate-string linter from flagging the tables as needing dedup.
+const (
+	testLoadStateLoaded   = "loaded"
+	testLoadStateNotFound = "not-found"
+
+	testActiveStateActive       = "active"
+	testActiveStateActivating   = "activating"
+	testActiveStateReloading    = "reloading"
+	testActiveStateDeactivating = "deactivating"
+	testActiveStateFailed       = "failed"
+	testActiveStateInactive     = "inactive"
+)
+
+// TestServiceProbeCommand proves the probe command names the exact unit
+// requested and asks systemctl for both properties this provider needs, in
+// the order ParseServiceProbe expects to find them.
+func TestServiceProbeCommand(t *testing.T) {
+	got := ServiceProbeCommand("k3s-agent")
+	want := "systemctl show -p LoadState -p ActiveState --value k3s-agent 2>/dev/null"
+	if got != want {
+		t.Errorf("ServiceProbeCommand(%q) = %q, want %q", "k3s-agent", got, want)
+	}
+}
+
+// TestParseServiceProbe proves the two-line reply is split into LoadState
+// (first) and ActiveState (second), matching the -p flag order
+// ServiceProbeCommand builds the command with.
+func TestParseServiceProbe(t *testing.T) {
 	cases := []struct {
-		stdout string
-		want   ServiceState
+		name       string
+		stdout     string
+		wantLoad   string
+		wantActive string
 	}{
-		{stdout: "active", want: ServiceActive},
-		{stdout: "activating", want: ServiceConverging},
-		{stdout: "reloading", want: ServiceConverging},
-		{stdout: "deactivating", want: ServiceConverging},
-		{stdout: "inactive", want: ServiceNotFound},
-		{stdout: "failed", want: ServiceNotFound},
-		{stdout: "unknown", want: ServiceNotFound},
-		{stdout: "", want: ServiceNotFound},
+		{name: "loaded and active", stdout: testLoadStateLoaded + "\n" + testActiveStateActive, wantLoad: testLoadStateLoaded, wantActive: testActiveStateActive},
+		{name: "loaded and activating", stdout: testLoadStateLoaded + "\n" + testActiveStateActivating, wantLoad: testLoadStateLoaded, wantActive: testActiveStateActivating},
+		{name: "not-found and inactive", stdout: testLoadStateNotFound + "\n" + testActiveStateInactive, wantLoad: testLoadStateNotFound, wantActive: testActiveStateInactive},
+		{name: "trailing whitespace trimmed", stdout: testLoadStateLoaded + "\n" + testActiveStateFailed + "\n", wantLoad: testLoadStateLoaded, wantActive: testActiveStateFailed},
+		{name: "empty reply", stdout: "", wantLoad: "", wantActive: ""},
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.stdout, func(t *testing.T) {
-			if got := ClassifyServiceState(tc.stdout); got != tc.want {
-				t.Errorf("ClassifyServiceState(%q) = %v, want %v", tc.stdout, got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseServiceProbe(tc.stdout)
+			if got.LoadState != tc.wantLoad {
+				t.Errorf("LoadState = %q, want %q", got.LoadState, tc.wantLoad)
+			}
+			if got.ActiveState != tc.wantActive {
+				t.Errorf("ActiveState = %q, want %q", got.ActiveState, tc.wantActive)
+			}
+		})
+	}
+}
+
+// TestServiceProbeExists proves existence is decided from LoadState alone,
+// and in particular that every ActiveState a non-blocking restart's
+// crash-loop or queued-but-not-yet-running window can produce --
+// activating, failed, inactive -- is still existence as long as systemd has
+// a loaded artifact for the unit. This is the direct fix for the regression
+// that misclassified 71 of 92 installed-but-not-active Observes as absence:
+// the old probe (`systemctl is-active <unit> 2>/dev/null || echo inactive`)
+// corrupted its own stdout into a two-line reply ("activating\ninactive") on
+// every one of these states, which matched no known case and fell through
+// to "not found".
+func TestServiceProbeExists(t *testing.T) {
+	cases := []struct {
+		name  string
+		probe ServiceProbe
+		want  bool
+	}{
+		{name: "loaded and active", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateActive}, want: true},
+		{name: "loaded and activating (queued restart in flight)", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateActivating}, want: true},
+		{name: "loaded and reloading", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateReloading}, want: true},
+		{name: "loaded and deactivating", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateDeactivating}, want: true},
+		{name: "loaded and failed (crash before ready)", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateFailed}, want: true},
+		{name: "loaded and inactive (auto-restart backoff gap)", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateInactive}, want: true},
+		{name: "not-found", probe: ServiceProbe{LoadState: testLoadStateNotFound, ActiveState: testActiveStateInactive}, want: false},
+		{name: "empty probe (SSH read failed)", probe: ServiceProbe{}, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.probe.Exists(); got != tc.want {
+				t.Errorf("Exists() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestServiceProbeReady proves readiness is decided from ActiveState alone,
+// and only a clean active state counts -- every transitional or failed
+// state reports not-ready without being treated as absence (see
+// TestServiceProbeExists).
+func TestServiceProbeReady(t *testing.T) {
+	cases := []struct {
+		name  string
+		probe ServiceProbe
+		want  bool
+	}{
+		{name: "active", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateActive}, want: true},
+		{name: "activating", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateActivating}, want: false},
+		{name: "failed", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateFailed}, want: false},
+		{name: "inactive", probe: ServiceProbe{LoadState: testLoadStateLoaded, ActiveState: testActiveStateInactive}, want: false},
+		{name: "not-found", probe: ServiceProbe{LoadState: testLoadStateNotFound, ActiveState: testActiveStateInactive}, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.probe.Ready(); got != tc.want {
+				t.Errorf("Ready() = %v, want %v", got, tc.want)
 			}
 		})
 	}

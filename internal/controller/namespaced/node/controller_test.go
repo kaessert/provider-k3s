@@ -40,7 +40,9 @@ const testNodeRoleAgent = "agent"
 
 // testIsActiveCmd is the exact systemctl probe Observe sends for an agent
 // role, shared across every fixture that keys a canned SSH response on it.
-const testIsActiveCmd = "systemctl is-active k3s-agent 2>/dev/null || echo inactive"
+// The reply is two lines -- LoadState then ActiveState -- matching what
+// ParseServiceProbe expects from k3s.ServiceProbeCommand.
+const testIsActiveCmd = "systemctl show -p LoadState -p ActiveState --value k3s-agent 2>/dev/null"
 
 // testServerHost and testNodeToken are the connector-resolved cluster
 // identity shared by every test fixture in this file (the values Connect
@@ -237,7 +239,7 @@ func TestJoinParamsCarriesMutableFieldsAndResolvedIdentity(t *testing.T) {
 // ExternalObservation.
 func TestObserveMinimalResponse(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "active"},
+		testIsActiveCmd: {Stdout: "loaded\nactive"},
 	}, sshResponse{})
 
 	e := &external{
@@ -336,12 +338,11 @@ func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
 	}
 }
 
-// TestObserveNotFound (T3) proves the systemctl probe reporting a
-// genuinely-not-running state ("inactive") is treated as absence, not an
-// error.
+// TestObserveNotFound (T3) proves systemd reporting no loaded artifact for
+// the unit at all is treated as absence, not an error.
 func TestObserveNotFound(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "inactive"},
+		testIsActiveCmd: {Stdout: "not-found\ninactive"},
 	}, sshResponse{})
 
 	e := &external{
@@ -358,7 +359,49 @@ func TestObserveNotFound(t *testing.T) {
 		t.Fatalf("Observe: %v", err)
 	}
 	if obs.ResourceExists {
-		t.Error("want ResourceExists false: the agent service reports inactive")
+		t.Error("want ResourceExists false: systemd has no loaded artifact for the agent unit")
+	}
+}
+
+// TestObserveInstalledButNotRunningIsNotResourceNotFound is the direct
+// regression test for the 76-Create-loop bug: a unit that is installed
+// (LoadState loaded) but currently "inactive" or "failed" -- exactly what a
+// real k3s host reported during an auto-restart backoff gap -- must be
+// reported as existing and not-ready, never as absent. The old probe
+// (`systemctl is-active k3s-agent 2>/dev/null || echo inactive`) corrupted
+// its own stdout into a two-line, unclassifiable reply on every one of
+// these states, which fell through to "not found" and drove
+// crossplane-runtime to re-run Create on top of a join already in flight.
+func TestObserveInstalledButNotRunningIsNotResourceNotFound(t *testing.T) {
+	for _, activeState := range []string{"inactive", "failed"} {
+		t.Run(activeState, func(t *testing.T) {
+			host, port := startFakeSSHServer(t, map[string]sshResponse{
+				testIsActiveCmd: {Stdout: "loaded\n" + activeState},
+			}, sshResponse{})
+
+			e := &external{
+				ssh:        newTestSSHClient(t, host, port),
+				serverHost: testServerHost,
+				nodeToken:  testNodeToken,
+				role:       testNodeRoleAgent,
+				kube:       newTestKubeClient(),
+			}
+			cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+
+			obs, err := e.Observe(context.Background(), cr)
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if !obs.ResourceExists {
+				t.Errorf("want ResourceExists true: the unit is installed (LoadState loaded), only ActiveState is %q", activeState)
+			}
+			if cr.Status.AtProvider.Ready {
+				t.Errorf("want Ready false: ActiveState is %q, not active", activeState)
+			}
+			if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+				t.Errorf("want Creating condition set while not ready, got reason %q", cond.Reason)
+			}
+		})
 	}
 }
 
@@ -371,7 +414,7 @@ func TestObserveNotFound(t *testing.T) {
 // on top of an install already in flight.
 func TestObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "activating"},
+		testIsActiveCmd: {Stdout: "loaded\nactivating"},
 	}, sshResponse{})
 
 	e := &external{
@@ -444,7 +487,7 @@ func TestObserveSuccessPopulatesFullMirror(t *testing.T) {
 	}
 
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd:                       {Stdout: "active"},
+		testIsActiveCmd:                       {Stdout: "loaded\nactive"},
 		"k3s --version 2>/dev/null | head -1": {Stdout: "k3s version v1.28.2+k3s1"},
 	}, sshResponse{})
 
@@ -501,7 +544,7 @@ func TestObserveSuccessPopulatesFullMirror(t *testing.T) {
 // soon as Observe runs, even before the resource is confirmed to exist.
 func TestObserveSetsExternalName(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "inactive"},
+		testIsActiveCmd: {Stdout: "not-found\ninactive"},
 	}, sshResponse{})
 
 	e := &external{

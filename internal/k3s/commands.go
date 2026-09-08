@@ -184,42 +184,76 @@ func nonBlockingRestartCommand(service string) string {
 	)
 }
 
-// ServiceState classifies a `systemctl is-active` reply for a k3s service
-// unit started by the non-blocking restart JoinCommand builds (see its doc
-// comment). Because that restart returns before the unit finishes starting,
-// Observe's poll loop can now see states a purely synchronous, blocking
-// restart never left it time to observe.
-type ServiceState int
+// ServiceProbeCommand builds the systemctl query Observe uses to decide
+// both whether a unit's install artifact exists at all, and separately
+// whether it is currently serving.
+//
+// This replaces an earlier probe of the shape `systemctl is-active <unit>
+// 2>/dev/null || echo inactive`. That command is broken for every reply
+// except a clean "active": `is-active` exits non-zero for "activating",
+// "reloading", "deactivating", "failed" and "inactive" alike, and on a bare
+// shell `||` chain the exit code is all that is tested -- so the `echo
+// inactive` fallback ALSO fires on top of whatever state is-active already
+// printed, turning a single-token reply into two lines ("activating\ninactive",
+// "failed\ninactive", ...). That two-line string matches none of the exact
+// single-token cases a classifier can switch on, so every non-"active" reply
+// -- including the transitional states a non-blocking restart is specifically
+// meant to surface -- was silently misclassified as absence, and
+// crossplane-runtime re-ran Create on top of an install already in flight.
+// Measured directly: a local systemd unit built to reproduce the same
+// Type=notify crash-loop a failing join produces (process exits before
+// calling sd_notify, Restart=on-failure) showed is-active's raw reply stuck
+// at "activating\ninactive" for the unit's entire auto-restart cycle.
+//
+// `systemctl show` has neither failure mode: it always exits 0 regardless of
+// whether the unit exists, so it needs no error-swallowing shell fallback,
+// and its `--value` output is one clean line per requested property with no
+// exit-code-driven interference. LoadState answers whether systemd has an
+// artifact for the unit at all -- "not-found" only when it has never heard
+// of it, and "loaded" (or any other value) from the moment get.k3s.io's
+// install script writes the unit file, independent of whether the process
+// behind it has ever successfully started. ActiveState answers whether that
+// process has actually signalled ready, separately.
+func ServiceProbeCommand(service string) string {
+	return fmt.Sprintf("systemctl show -p LoadState -p ActiveState --value %s 2>/dev/null", service)
+}
 
-const (
-	// ServiceNotFound means the unit was never started at all -- "inactive",
-	// "failed", "unknown" or any other reply this provider does not
-	// recognise as part of a start/restart in flight. Treated as absence:
-	// the external resource does not exist yet (or reinstalling it is
-	// exactly the right response, per this provider's stable-external-name
-	// model).
-	ServiceNotFound ServiceState = iota
-	// ServiceConverging means a restart is in flight -- "activating",
-	// "reloading" or "deactivating" (the stop phase of a restart) -- and
-	// the unit has neither reached nor left its active state yet. The
-	// resource already exists (it must not be re-created), but is not yet
-	// ready.
-	ServiceConverging
-	// ServiceActive means the unit's own Type=notify process has reported
-	// itself ready.
-	ServiceActive
-)
+// ServiceProbe is the parsed reply from a command ServiceProbeCommand built.
+type ServiceProbe struct {
+	LoadState   string
+	ActiveState string
+}
 
-// ClassifyServiceState maps a `systemctl is-active` reply to a ServiceState.
-func ClassifyServiceState(stdout string) ServiceState {
-	switch stdout {
-	case "active":
-		return ServiceActive
-	case "activating", "reloading", "deactivating":
-		return ServiceConverging
-	default:
-		return ServiceNotFound
+// ParseServiceProbe splits the two-line reply ServiceProbeCommand's output
+// carries -- LoadState first, ActiveState second, matching the -p flag
+// order the command was built with -- into a ServiceProbe. A short or empty
+// reply (a probe that failed to run at all) leaves the corresponding field
+// empty, which Exists and Ready both already treat as "no".
+func ParseServiceProbe(stdout string) ServiceProbe {
+	lines := strings.SplitN(strings.TrimSpace(stdout), "\n", 2)
+	probe := ServiceProbe{LoadState: strings.TrimSpace(lines[0])}
+	if len(lines) > 1 {
+		probe.ActiveState = strings.TrimSpace(lines[1])
 	}
+	return probe
+}
+
+// Exists reports whether systemd has a loaded artifact for the unit --
+// true from the moment get.k3s.io's install script writes the unit file,
+// independent of whether the process behind it has ever started or is
+// mid-crash-loop. This is the existence signal Observe must use for a unit
+// started by the non-blocking restart JoinCommand and InstallCommand build:
+// the queued restart, an auto-restart backoff gap, or a transient "failed"
+// all still report a loaded artifact, and treating any of them as absence
+// re-triggers Create on the very restart this provider just queued.
+func (p ServiceProbe) Exists() bool {
+	return p.LoadState != "" && p.LoadState != "not-found"
+}
+
+// Ready reports whether the unit's own Type=notify process has signalled
+// ready.
+func (p ServiceProbe) Ready() bool {
+	return p.ActiveState == "active"
 }
 
 // UninstallServerCommand returns the k3s server uninstall command.

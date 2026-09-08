@@ -85,9 +85,9 @@ const externalTimeout = 10 * time.Minute
 // once the join is queued on the host, so the resource genuinely may not
 // exist yet, from the external API's point of view, when the immediate
 // post-create Observe runs. That is not a problem the grace period exists
-// to paper over: Observe's systemctl probe reports it as ServiceConverging
-// (exists, not yet ready) rather than absent, so no spurious re-Create
-// follows regardless of how soon that first Observe lands.
+// to paper over: Observe's systemctl probe reports the unit's LoadState as
+// loaded (exists, not yet ready) rather than absent, so no spurious
+// re-Create follows regardless of how soon that first Observe lands.
 
 // External-Name Strategy
 //
@@ -106,10 +106,10 @@ const externalTimeout = 10 * time.Minute
 // resource under this model: identity here is address-based, not
 // content-derived, and the controller has no signal to distinguish a
 // re-image from the original install continuing to run. Observe's
-// existence probe (systemctl is-active over SSH) simply reports
-// not-active until k3s is reinstalled, and the same external-name
-// continues to address it -- that is the correct behaviour for a stable
-// identifier, not a limitation of it.
+// existence probe (systemd LoadState over SSH) simply reports no loaded
+// artifact until k3s is reinstalled, and the same external-name continues
+// to address it -- that is the correct behaviour for a stable identifier,
+// not a limitation of it.
 //
 // managed.WithDeterministicExternalName(true) is set below, and Observe
 // keeps the external-name annotation in sync with host on every pass
@@ -299,21 +299,21 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 
 	service := k3s.ServiceNameForRole(e.role)
 
-	stdout, _, err := e.ssh.Execute(ctx, "systemctl is-active "+service+" 2>/dev/null || echo inactive")
+	stdout, _, err := e.ssh.Execute(ctx, k3s.ServiceProbeCommand(service))
 	if err != nil {
 		return managed.ExternalObservation{}, errors.Wrap(err, "cannot check k3s status")
 	}
-	state := k3s.ClassifyServiceState(stdout)
-	if state == k3s.ServiceNotFound {
+	probe := k3s.ParseServiceProbe(stdout)
+	if !probe.Exists() {
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
-	ready := state == k3s.ServiceActive
+	ready := probe.Ready()
 
 	versionOut, _, _ := e.ssh.Execute(ctx, "k3s --version 2>/dev/null | head -1")
 
 	// Create and Update return as soon as the restart is queued (see
-	// k3s.JoinCommand's doc comment), so a ServiceConverging read here is a
-	// restart genuinely still in flight -- report Creating() explicitly
+	// k3s.JoinCommand's doc comment), so a loaded-but-not-active read here is
+	// a restart genuinely still in flight -- report Creating() explicitly
 	// rather than leaving a stale Available condition in place from a
 	// prior pass (an Update-driven restart, or a flapping unit, can revisit
 	// this path after Available was already set once).

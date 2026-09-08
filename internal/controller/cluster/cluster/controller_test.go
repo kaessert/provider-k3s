@@ -35,8 +35,9 @@ import (
 
 // testIsActiveCmd is the exact systemctl probe Observe sends for the k3s
 // server unit, shared across every fixture that keys a canned SSH response
-// on it.
-const testIsActiveCmd = "systemctl is-active k3s 2>/dev/null || echo inactive"
+// on it. The reply is two lines -- LoadState then ActiveState -- matching
+// what ParseServiceProbe expects from k3s.ServiceProbeCommand.
+const testIsActiveCmd = "systemctl show -p LoadState -p ActiveState --value k3s 2>/dev/null"
 
 // newTestKubeClient builds a fake kube client seeded with objs, for
 // exercising persistLastAppliedClusterConfig's conflict-safe
@@ -233,7 +234,7 @@ func TestInstallParamsCarriesMutableFields(t *testing.T) {
 // return a sane ExternalObservation.
 func TestClusterObserveMinimalResponse(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "active"},
+		testIsActiveCmd: {Stdout: "loaded\nactive"},
 	}, sshResponse{}) // fallback: empty stdout, exit 0 -- covers version/node-token/kubeconfig reads
 
 	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
@@ -276,7 +277,7 @@ func TestClusterObserveMinimalResponse(t *testing.T) {
 // flight, restarting a server that was mid-converge.
 func TestClusterObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "activating"},
+		testIsActiveCmd: {Stdout: "loaded\nactivating"},
 	}, sshResponse{})
 
 	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
@@ -357,12 +358,12 @@ func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
 	}
 }
 
-// TestClusterObserveNotFound (T3) proves the systemctl probe reporting
-// anything but "active" is treated as absence, not an error -- there is no
-// HTTP 404 on this transport, so this is the SSH-native equivalent.
+// TestClusterObserveNotFound (T3) proves systemd reporting no loaded
+// artifact for the unit at all is treated as absence, not an error -- there
+// is no HTTP 404 on this transport, so this is the SSH-native equivalent.
 func TestClusterObserveNotFound(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "inactive"},
+		testIsActiveCmd: {Stdout: "not-found\ninactive"},
 	}, sshResponse{})
 
 	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
@@ -373,7 +374,44 @@ func TestClusterObserveNotFound(t *testing.T) {
 		t.Fatalf("Observe: %v", err)
 	}
 	if obs.ResourceExists {
-		t.Error("want ResourceExists false: k3s reports inactive")
+		t.Error("want ResourceExists false: systemd has no loaded artifact for the unit")
+	}
+}
+
+// TestClusterObserveInstalledButNotRunningIsNotResourceNotFound is the
+// direct regression test for the 76-Create-loop bug: a unit that is
+// installed (LoadState loaded) but currently "inactive" or "failed" --
+// exactly what a real k3s host reported during an auto-restart backoff gap
+// -- must be reported as existing and not-ready, never as absent. The old
+// probe (`systemctl is-active k3s 2>/dev/null || echo inactive`) corrupted
+// its own stdout into a two-line, unclassifiable reply on every one of
+// these states, which fell through to "not found" and drove
+// crossplane-runtime to re-run Create on top of an install already in
+// flight.
+func TestClusterObserveInstalledButNotRunningIsNotResourceNotFound(t *testing.T) {
+	for _, activeState := range []string{"inactive", "failed"} {
+		t.Run(activeState, func(t *testing.T) {
+			host, port := startFakeSSHServer(t, map[string]sshResponse{
+				testIsActiveCmd: {Stdout: "loaded\n" + activeState},
+			}, sshResponse{})
+
+			e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
+			cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "")
+
+			obs, err := e.Observe(context.Background(), cr)
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if !obs.ResourceExists {
+				t.Errorf("want ResourceExists true: the unit is installed (LoadState loaded), only ActiveState is %q", activeState)
+			}
+			if cr.Status.AtProvider.Ready {
+				t.Errorf("want Ready false: ActiveState is %q, not active", activeState)
+			}
+			if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+				t.Errorf("want Creating condition set while not ready, got reason %q", cond.Reason)
+			}
+		})
 	}
 }
 
@@ -415,7 +453,7 @@ func TestClusterObserveSuccessPopulatesFullMirror(t *testing.T) {
 	}
 
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd:                       {Stdout: "active"},
+		testIsActiveCmd:                       {Stdout: "loaded\nactive"},
 		"k3s --version 2>/dev/null | head -1": {Stdout: "k3s version v1.28.2+k3s1"},
 		"sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null": {Stdout: "the-node-token"},
 		"sudo cat /etc/rancher/k3s/k3s.yaml 2>/dev/null":              {Stdout: "server: https://127.0.0.1:6443\n"},
@@ -485,7 +523,7 @@ func TestClusterObserveSuccessPopulatesFullMirror(t *testing.T) {
 // a create response.
 func TestClusterObserveSetsExternalName(t *testing.T) {
 	host, port := startFakeSSHServer(t, map[string]sshResponse{
-		testIsActiveCmd: {Stdout: "inactive"},
+		testIsActiveCmd: {Stdout: "not-found\ninactive"},
 	}, sshResponse{})
 
 	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
