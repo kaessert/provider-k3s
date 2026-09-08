@@ -257,6 +257,8 @@ spec:
                   rule: '!has(oldSelf.port) || has(self.port)'
                 - message: clusterRef cannot be removed once set
                   rule: '!has(oldSelf.clusterRef) || has(self.clusterRef)'
+                - message: cluster cannot be removed once set
+                  rule: '!has(oldSelf.cluster) || has(self.cluster)'
                 - message: role cannot be removed once set
                   rule: '!has(oldSelf.role) || has(self.role)'
               managementPolicies:
@@ -351,6 +353,12 @@ spec:
               atProvider:
                 description: NodeObservation are the observable fields of a Node.
                 properties:
+                  cluster:
+                    description: |-
+                      Cluster mirrors spec.forProvider.cluster: the resolved Kubernetes
+                      object name of the Cluster this node joined. Immutable once set, so
+                      it cannot diverge from spec once the resource exists.
+                    type: string
                   extraArgs:
                     description: |-
                       ExtraArgs mirrors the value this controller most recently confirmed

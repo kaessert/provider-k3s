@@ -349,6 +349,12 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 	// folded into the composite literal above) so the assignment stays
 	// mechanically greppable as the identity write it is.
 	cr.Status.AtProvider.ID = meta.GetExternalName(cr)
+	// Cluster is *string in spec (unset on an Observe-only adoption that
+	// has not resolved a reference yet) -- mirror it only once resolved,
+	// rather than reporting an empty string as if it had been confirmed.
+	if cr.Spec.ForProvider.Cluster != nil {
+		cr.Status.AtProvider.Cluster = *cr.Spec.ForProvider.Cluster
+	}
 	if hasLast {
 		cr.Status.AtProvider.K3sChannel = last.K3sChannel
 		cr.Status.AtProvider.ExtraArgs = last.ExtraArgs
@@ -401,9 +407,9 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot join k3s cluster: %s", stderr)
+		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot join k3s cluster: %s", redactedStderr)
 	}
 
 	if err := persistLastAppliedNodeConfig(ctx, e.kube, cr); err != nil {
@@ -432,9 +438,9 @@ func (e *external) Update(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s node: %s", stderr)
+		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s node: %s", redactedStderr)
 	}
 
 	if err := persistLastAppliedNodeConfig(ctx, e.kube, cr); err != nil {
@@ -474,9 +480,9 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 		cmd = k3s.UninstallAgentCommand()
 	}
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", stderr)
+		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", redactedStderr)
 	}
 
 	return managed.ExternalDelete{}, nil

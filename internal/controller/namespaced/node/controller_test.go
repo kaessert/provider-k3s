@@ -564,6 +564,9 @@ func TestObserveSuccessPopulatesFullMirror(t *testing.T) {
 	if !ap.Ready {
 		t.Error("want Ready true")
 	}
+	if ap.Cluster != *cr.Spec.ForProvider.Cluster {
+		t.Errorf("want Cluster mirrored from spec, got %q want %q", ap.Cluster, *cr.Spec.ForProvider.Cluster)
+	}
 	if ap.Host != cr.Spec.ForProvider.Host {
 		t.Errorf("want Host mirrored from spec, got %q want %q", ap.Host, cr.Spec.ForProvider.Host)
 	}

@@ -43,6 +43,7 @@ func ClusterObjectName() reference.ExtractValueFn {
 // NodeParameters are the configurable fields of a Node.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.port) || has(self.port)",message="port cannot be removed once set"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.clusterRef) || has(self.clusterRef)",message="clusterRef cannot be removed once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cluster) || has(self.cluster)",message="cluster cannot be removed once set"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.role) || has(self.role)",message="role cannot be removed once set"
 type NodeParameters struct {
 	// Host is the DNS name or IP address of the target machine. It is the
@@ -122,6 +123,11 @@ type NodeObservation struct {
 
 	// Ready indicates the node has successfully joined the cluster.
 	Ready bool `json:"ready,omitempty"`
+
+	// Cluster mirrors spec.forProvider.cluster: the resolved Kubernetes
+	// object name of the Cluster this node joined. Immutable once set, so
+	// it cannot diverge from spec once the resource exists.
+	Cluster string `json:"cluster,omitempty"`
 
 	// Host mirrors spec.forProvider.host: the SSH target this Node was
 	// joined on. Immutable, so it cannot diverge from spec once the
