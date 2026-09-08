@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
+	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/cluster/v1alpha1"
 	dd "github.com/crossplane-contrib/provider-k3s/apis/common/driftdetection"
@@ -473,13 +474,21 @@ func TestEligibilityRejectsFieldAbsentFromResource(t *testing.T) {
 
 // A path that exists on forProvider but has no counterpart in
 // status.atProvider is write-only -- there is nothing to substitute -- and
-// must be rejected. extraArgs is real on this provider today: the
-// observation mirror is thin (Cluster reports only ready and k3sVersion), so
-// most forProvider fields fall into this class until the mirror is widened.
+// must be rejected. Cluster's mirror is now full (every ForProvider field has
+// an Observation counterpart), so this exercises Node's clusterRef instead:
+// a cross-resource reference field, structurally excluded from the mirror by
+// convention (only the resolved value is ever mirrored, never a Ref itself),
+// so it is permanently write-only in the sense this check cares about.
 func TestEligibilityRejectsWriteOnlyFieldOnRealResource(t *testing.T) {
-	cr := mr(config(dd.ModeEnabled, "forProvider.extraArgs"), params("v1.0.0-seed"))
+	cr := &v1alpha1.Node{}
+	cr.Spec.DriftDetection = config(dd.ModeEnabled, "forProvider.clusterRef")
+	cr.Spec.ForProvider = v1alpha1.NodeParameters{
+		Host:       testHost,
+		ClusterRef: &xpv1.Reference{Name: "some-cluster"},
+		Role:       "agent",
+	}
 	if _, err := ReadConfig(cr); err == nil {
-		t.Error("ReadConfig(forProvider.extraArgs): want rejection of a write-only field")
+		t.Error("ReadConfig(forProvider.clusterRef): want rejection of a write-only field")
 	}
 }
 

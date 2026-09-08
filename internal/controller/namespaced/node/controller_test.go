@@ -22,8 +22,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -36,12 +38,23 @@ import (
 // duplicate-string linter from flagging the fixtures as needing dedup.
 const testNodeRoleAgent = "agent"
 
+// testServerHost and testNodeToken are the connector-resolved cluster
+// identity shared by every test fixture in this file (the values Connect
+// would have produced from resolveClusterInfo).
+const (
+	testServerHost = "server.example.com"
+	testNodeToken  = "the-node-token"
+)
+
 // newTestKubeClient builds a fake kube client seeded with objs, for
 // exercising persistLastAppliedNodeConfig's conflict-safe read-modify-write
 // against a real (fake) API server rather than an in-memory struct.
 func newTestKubeClient(objs ...client.Object) client.Client {
 	s := runtime.NewScheme()
 	if err := v1alpha1.SchemeBuilder.AddToScheme(s); err != nil {
+		panic(err)
+	}
+	if err := corev1.AddToScheme(s); err != nil {
 		panic(err)
 	}
 	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
@@ -51,7 +64,7 @@ func nodeParams(k3sVersion, extraArgs string) v1alpha1.NodeParameters {
 	return v1alpha1.NodeParameters{
 		Host:       "10.0.0.2",
 		Port:       22,
-		ClusterRef: xpv1.Reference{Name: "my-cluster"},
+		ClusterRef: &xpv1.Reference{Name: "my-cluster"},
 		Role:       testNodeRoleAgent,
 		K3sVersion: k3sVersion,
 		K3sChannel: "stable",
@@ -135,7 +148,7 @@ func TestIsUpToDateIgnoresImmutableField(t *testing.T) {
 	// comparison itself does not depend on them.
 	cr.Spec.ForProvider.Role = "server"
 	cr.Spec.ForProvider.Host = "10.0.0.99"
-	cr.Spec.ForProvider.ClusterRef = xpv1.Reference{Name: "someone-elses-cluster"}
+	cr.Spec.ForProvider.ClusterRef = &xpv1.Reference{Name: "someone-elses-cluster"}
 
 	upToDate, err := nodeIsUpToDate(cr)
 	if err != nil {
@@ -198,7 +211,7 @@ func TestJoinParamsEchoesImmutableRole(t *testing.T) {
 func TestJoinParamsCarriesMutableFieldsAndResolvedIdentity(t *testing.T) {
 	p := nodeParams("v1.29.0+k3s1", "--node-label env=prod")
 
-	got := joinParamsFor(p, "server.example.com", "the-node-token")
+	got := joinParamsFor(p, testServerHost, testNodeToken)
 
 	if got.K3sVersion != "v1.29.0+k3s1" {
 		t.Errorf("want k3sVersion carried through, got %q", got.K3sVersion)
@@ -206,10 +219,10 @@ func TestJoinParamsCarriesMutableFieldsAndResolvedIdentity(t *testing.T) {
 	if got.ExtraArgs != "--node-label env=prod" {
 		t.Errorf("want extraArgs carried through, got %q", got.ExtraArgs)
 	}
-	if got.ServerHost != "server.example.com" {
+	if got.ServerHost != testServerHost {
 		t.Errorf("want the connector-resolved server host, got %q", got.ServerHost)
 	}
-	if got.NodeToken != "the-node-token" {
+	if got.NodeToken != testNodeToken {
 		t.Errorf("want the connector-resolved node token, got %q", got.NodeToken)
 	}
 }
@@ -225,8 +238,8 @@ func TestObserveMinimalResponse(t *testing.T) {
 
 	e := &external{
 		ssh:        newTestSSHClient(t, host, port),
-		serverHost: "server.example.com",
-		nodeToken:  "the-node-token",
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
 		role:       testNodeRoleAgent,
 		kube:       newTestKubeClient(),
 	}
@@ -260,8 +273,8 @@ func TestDeleteServerError(t *testing.T) {
 
 	e := &external{
 		ssh:        newTestSSHClient(t, host, port),
-		serverHost: "server.example.com",
-		nodeToken:  "the-node-token",
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
 		role:       testNodeRoleAgent,
 		kube:       newTestKubeClient(),
 	}
@@ -294,8 +307,8 @@ func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
 
 	e := &external{
 		ssh:        newTestSSHClient(t, host, port),
-		serverHost: "server.example.com",
-		nodeToken:  "the-node-token",
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
 		role:       testNodeRoleAgent,
 		kube:       newTestKubeClient(),
 	}
@@ -316,5 +329,229 @@ func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("want the error to unwrap to context.DeadlineExceeded, got %q", err.Error())
+	}
+}
+
+// TestObserveNotFound (T3) proves the systemctl probe reporting anything
+// but "active" is treated as absence, not an error.
+func TestObserveNotFound(t *testing.T) {
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		"systemctl is-active k3s-agent 2>/dev/null || echo inactive": {Stdout: "inactive"},
+	}, sshResponse{})
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+
+	obs, err := e.Observe(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.ResourceExists {
+		t.Error("want ResourceExists false: the agent service reports inactive")
+	}
+}
+
+// TestObserveServerError (T4) proves an SSH transport failure is surfaced
+// as a wrapped error rather than swallowed or panicked.
+func TestObserveServerError(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{})
+	ssh := newTestSSHClient(t, host, port)
+	if err := ssh.Close(); err != nil {
+		t.Fatalf("close ssh client: %v", err)
+	}
+
+	e := &external{
+		ssh:        ssh,
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+
+	_, err := e.Observe(context.Background(), cr)
+	if err == nil {
+		t.Fatal("want an error when the SSH transport is unavailable")
+	}
+	if !strings.Contains(err.Error(), "cannot check k3s status") {
+		t.Errorf("want the error wrapped with its Observe-path context, got %q", err.Error())
+	}
+	if errors.Unwrap(err) == nil {
+		t.Error("want the error wrapped via errors.Wrap, got an unwrapped error")
+	}
+}
+
+// TestObserveSuccessPopulatesFullMirror (T2, T7, T10) is the happy path:
+// SSH returns a full response, the last-applied annotation already matches
+// spec, and every atProvider field comes out populated, asserted field by
+// field rather than by struct equality against a fixture the test itself
+// built.
+func TestObserveSuccessPopulatesFullMirror(t *testing.T) {
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	if err := persistLastAppliedNodeConfig(context.Background(), kube, cr); err != nil {
+		t.Fatalf("persistLastAppliedNodeConfig: %v", err)
+	}
+
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		"systemctl is-active k3s-agent 2>/dev/null || echo inactive": {Stdout: "active"},
+		"k3s --version 2>/dev/null | head -1":                        {Stdout: "k3s version v1.28.2+k3s1"},
+	}, sshResponse{})
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       kube,
+	}
+
+	obs, err := e.Observe(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.ResourceExists {
+		t.Error("want ResourceExists true")
+	}
+	if !obs.ResourceUpToDate {
+		t.Error("want ResourceUpToDate true: the last-applied annotation matches spec")
+	}
+
+	ap := cr.Status.AtProvider
+	if ap.ID != cr.Spec.ForProvider.Host {
+		t.Errorf("want ID %q (the external-name, deterministic from host), got %q", cr.Spec.ForProvider.Host, ap.ID)
+	}
+	if !ap.Ready {
+		t.Error("want Ready true")
+	}
+	if ap.Host != cr.Spec.ForProvider.Host {
+		t.Errorf("want Host mirrored from spec, got %q want %q", ap.Host, cr.Spec.ForProvider.Host)
+	}
+	if ap.Port != cr.Spec.ForProvider.Port {
+		t.Errorf("want Port mirrored from spec, got %d want %d", ap.Port, cr.Spec.ForProvider.Port)
+	}
+	if ap.Role != testNodeRoleAgent {
+		t.Errorf("want Role %q, got %q", testNodeRoleAgent, ap.Role)
+	}
+	if ap.K3sVersion != "k3s version v1.28.2+k3s1" {
+		t.Errorf("want K3sVersion from the live probe, got %q", ap.K3sVersion)
+	}
+	if ap.K3sChannel != cr.Spec.ForProvider.K3sChannel {
+		t.Errorf("want K3sChannel mirrored from the last-applied record, got %q want %q", ap.K3sChannel, cr.Spec.ForProvider.K3sChannel)
+	}
+	if ap.ExtraArgs != cr.Spec.ForProvider.ExtraArgs {
+		t.Errorf("want ExtraArgs mirrored from the last-applied record, got %q want %q", ap.ExtraArgs, cr.Spec.ForProvider.ExtraArgs)
+	}
+	if ap.TLSSAN != cr.Spec.ForProvider.TLSSAN {
+		t.Errorf("want TLSSAN mirrored from the last-applied record, got %q want %q", ap.TLSSAN, cr.Spec.ForProvider.TLSSAN)
+	}
+}
+
+// TestObserveSetsExternalName proves identity is established from host as
+// soon as Observe runs, even before the resource is confirmed to exist.
+func TestObserveSetsExternalName(t *testing.T) {
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		"systemctl is-active k3s-agent 2>/dev/null || echo inactive": {Stdout: "inactive"},
+	}, sshResponse{})
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+
+	if _, err := e.Observe(context.Background(), cr); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if got := meta.GetExternalName(cr); got != cr.Spec.ForProvider.Host {
+		t.Errorf("want external-name set to host %q, got %q", cr.Spec.ForProvider.Host, got)
+	}
+}
+
+// TestCreateSuccess (Create POST success) proves a successful join both
+// returns no error and durably persists the last-applied configuration.
+func TestCreateSuccess(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{Stdout: "joined"})
+
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       kube,
+	}
+
+	if _, err := e.Create(context.Background(), cr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	upToDate, err := nodeIsUpToDate(cr)
+	if err != nil {
+		t.Fatalf("nodeIsUpToDate: %v", err)
+	}
+	if !upToDate {
+		t.Error("want up to date immediately after Create: the last-applied annotation was just seeded from this same spec")
+	}
+}
+
+// TestUpdateSuccess (Update PUT success) proves a successful reconfigure
+// both returns no error and durably persists the new last-applied
+// configuration.
+func TestUpdateSuccess(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{Stdout: "reconfigured"})
+
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	if err := persistLastAppliedNodeConfig(context.Background(), kube, cr); err != nil {
+		t.Fatalf("persistLastAppliedNodeConfig: %v", err)
+	}
+	cr.Spec.ForProvider.ExtraArgs = "--node-label env=prod"
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       kube,
+	}
+	if _, err := e.Update(context.Background(), cr); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	upToDate, err := nodeIsUpToDate(cr)
+	if err != nil {
+		t.Fatalf("nodeIsUpToDate: %v", err)
+	}
+	if !upToDate {
+		t.Error("want up to date immediately after Update: the last-applied annotation was just re-seeded from this same spec")
+	}
+}
+
+// TestDeleteSuccess (T8) proves a successful uninstall returns no error.
+func TestDeleteSuccess(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{Stdout: "uninstalled"})
+
+	e := &external{
+		ssh:        newTestSSHClient(t, host, port),
+		serverHost: testServerHost,
+		nodeToken:  testNodeToken,
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+
+	if _, err := e.Delete(context.Background(), cr); err != nil {
+		t.Fatalf("Delete: %v", err)
 	}
 }

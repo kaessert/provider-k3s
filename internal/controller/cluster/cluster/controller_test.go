@@ -22,7 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
 	"github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -37,6 +39,9 @@ import (
 func newTestKubeClient(objs ...client.Object) client.Client {
 	s := runtime.NewScheme()
 	if err := v1alpha1.SchemeBuilder.AddToScheme(s); err != nil {
+		panic(err)
+	}
+	if err := corev1.AddToScheme(s); err != nil {
 		panic(err)
 	}
 	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
@@ -309,5 +314,211 @@ func TestCreateReturnsPromptlyOnContextDeadline(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("want the error to unwrap to context.DeadlineExceeded, got %q", err.Error())
+	}
+}
+
+// TestClusterObserveNotFound (T3) proves the systemctl probe reporting
+// anything but "active" is treated as absence, not an error -- there is no
+// HTTP 404 on this transport, so this is the SSH-native equivalent.
+func TestClusterObserveNotFound(t *testing.T) {
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		"systemctl is-active k3s 2>/dev/null || echo inactive": {Stdout: "inactive"},
+	}, sshResponse{})
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "")
+
+	obs, err := e.Observe(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if obs.ResourceExists {
+		t.Error("want ResourceExists false: k3s reports inactive")
+	}
+}
+
+// TestClusterObserveServerError (T4) proves an SSH transport failure is
+// surfaced as a wrapped error rather than swallowed or panicked -- a closed
+// connection stands in for a dropped session mid-probe.
+func TestClusterObserveServerError(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{})
+	ssh := newTestSSHClient(t, host, port)
+	if err := ssh.Close(); err != nil {
+		t.Fatalf("close ssh client: %v", err)
+	}
+
+	e := &external{ssh: ssh, host: host, kube: newTestKubeClient()}
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "")
+
+	_, err := e.Observe(context.Background(), cr)
+	if err == nil {
+		t.Fatal("want an error when the SSH transport is unavailable")
+	}
+	if !strings.Contains(err.Error(), "cannot check k3s status") {
+		t.Errorf("want the error wrapped with its Observe-path context, got %q", err.Error())
+	}
+	if errors.Unwrap(err) == nil {
+		t.Error("want the error wrapped via errors.Wrap, got an unwrapped error")
+	}
+}
+
+// TestClusterObserveSuccessPopulatesFullMirror (T2, T7, T10) is the happy
+// path: SSH returns a full response, the last-applied annotation already
+// matches spec, and every atProvider field -- not just Ready and
+// K3sVersion -- comes out populated, asserted field by field rather than by
+// struct equality against a fixture the test itself built.
+func TestClusterObserveSuccessPopulatesFullMirror(t *testing.T) {
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	if err := persistLastAppliedClusterConfig(context.Background(), kube, cr); err != nil {
+		t.Fatalf("persistLastAppliedClusterConfig: %v", err)
+	}
+
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		"systemctl is-active k3s 2>/dev/null || echo inactive":        {Stdout: "active"},
+		"k3s --version 2>/dev/null | head -1":                         {Stdout: "k3s version v1.28.2+k3s1"},
+		"sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null": {Stdout: "the-node-token"},
+		"sudo cat /etc/rancher/k3s/k3s.yaml 2>/dev/null":              {Stdout: "server: https://127.0.0.1:6443\n"},
+	}, sshResponse{})
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: kube}
+
+	obs, err := e.Observe(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !obs.ResourceExists {
+		t.Error("want ResourceExists true")
+	}
+	if !obs.ResourceUpToDate {
+		t.Error("want ResourceUpToDate true: the last-applied annotation matches spec")
+	}
+
+	ap := cr.Status.AtProvider
+	if ap.ID != cr.Spec.ForProvider.Host {
+		t.Errorf("want ID %q (the external-name, deterministic from host), got %q", cr.Spec.ForProvider.Host, ap.ID)
+	}
+	if !ap.Ready {
+		t.Error("want Ready true")
+	}
+	if ap.Host != cr.Spec.ForProvider.Host {
+		t.Errorf("want Host mirrored from spec, got %q want %q", ap.Host, cr.Spec.ForProvider.Host)
+	}
+	if ap.Port != cr.Spec.ForProvider.Port {
+		t.Errorf("want Port mirrored from spec, got %d want %d", ap.Port, cr.Spec.ForProvider.Port)
+	}
+	if ap.K3sVersion != "k3s version v1.28.2+k3s1" {
+		t.Errorf("want K3sVersion from the live probe, got %q", ap.K3sVersion)
+	}
+	if ap.K3sChannel != cr.Spec.ForProvider.K3sChannel {
+		t.Errorf("want K3sChannel mirrored from the last-applied record, got %q want %q", ap.K3sChannel, cr.Spec.ForProvider.K3sChannel)
+	}
+	if ap.ClusterInit != cr.Spec.ForProvider.ClusterInit {
+		t.Errorf("want ClusterInit mirrored from spec, got %v want %v", ap.ClusterInit, cr.Spec.ForProvider.ClusterInit)
+	}
+	if ap.TLSSAN != cr.Spec.ForProvider.TLSSAN {
+		t.Errorf("want TLSSAN mirrored from the last-applied record, got %q want %q", ap.TLSSAN, cr.Spec.ForProvider.TLSSAN)
+	}
+	if ap.DisableTraefik != cr.Spec.ForProvider.DisableTraefik {
+		t.Errorf("want DisableTraefik mirrored from the last-applied record, got %v want %v", ap.DisableTraefik, cr.Spec.ForProvider.DisableTraefik)
+	}
+	if ap.DisableServiceLB != cr.Spec.ForProvider.DisableServiceLB {
+		t.Errorf("want DisableServiceLB mirrored from the last-applied record, got %v want %v", ap.DisableServiceLB, cr.Spec.ForProvider.DisableServiceLB)
+	}
+	if ap.ExtraArgs != cr.Spec.ForProvider.ExtraArgs {
+		t.Errorf("want ExtraArgs mirrored from the last-applied record, got %q want %q", ap.ExtraArgs, cr.Spec.ForProvider.ExtraArgs)
+	}
+	if ap.DatastoreEndpoint != cr.Spec.ForProvider.DatastoreEndpoint {
+		t.Errorf("want DatastoreEndpoint mirrored from spec, got %q want %q", ap.DatastoreEndpoint, cr.Spec.ForProvider.DatastoreEndpoint)
+	}
+	if obs.ConnectionDetails["kubeconfig"] == nil {
+		t.Error("want kubeconfig connection detail present")
+	}
+	if obs.ConnectionDetails["node-token"] == nil {
+		t.Error("want node-token connection detail present")
+	}
+}
+
+// TestClusterObserveSetsExternalName proves identity is established from
+// host as soon as Observe runs, even before the resource is confirmed to
+// exist -- deterministic assignment means the value never has to wait for
+// a create response.
+func TestClusterObserveSetsExternalName(t *testing.T) {
+	host, port := startFakeSSHServer(t, map[string]sshResponse{
+		"systemctl is-active k3s 2>/dev/null || echo inactive": {Stdout: "inactive"},
+	}, sshResponse{})
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "")
+
+	if _, err := e.Observe(context.Background(), cr); err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if got := meta.GetExternalName(cr); got != cr.Spec.ForProvider.Host {
+		t.Errorf("want external-name set to host %q, got %q", cr.Spec.ForProvider.Host, got)
+	}
+}
+
+// TestClusterCreateSuccess (Create POST success, this provider's SSH
+// equivalent) proves a successful install both returns no error and
+// durably persists the last-applied configuration, so the very next
+// Observe can evaluate convergence.
+func TestClusterCreateSuccess(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{Stdout: "installed"})
+
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: kube}
+
+	if _, err := e.Create(context.Background(), cr); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	upToDate, err := clusterIsUpToDate(cr)
+	if err != nil {
+		t.Fatalf("clusterIsUpToDate: %v", err)
+	}
+	if !upToDate {
+		t.Error("want up to date immediately after Create: the last-applied annotation was just seeded from this same spec")
+	}
+}
+
+// TestClusterUpdateSuccess (Update PUT success) proves a successful
+// reconfigure both returns no error and durably persists the new
+// last-applied configuration.
+func TestClusterUpdateSuccess(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{Stdout: "reconfigured"})
+
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "--node-label foo=bar")
+	kube := newTestKubeClient(cr)
+	if err := persistLastAppliedClusterConfig(context.Background(), kube, cr); err != nil {
+		t.Fatalf("persistLastAppliedClusterConfig: %v", err)
+	}
+	cr.Spec.ForProvider.ExtraArgs = "--node-label env=prod"
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: kube}
+	if _, err := e.Update(context.Background(), cr); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	upToDate, err := clusterIsUpToDate(cr)
+	if err != nil {
+		t.Fatalf("clusterIsUpToDate: %v", err)
+	}
+	if !upToDate {
+		t.Error("want up to date immediately after Update: the last-applied annotation was just re-seeded from this same spec")
+	}
+}
+
+// TestClusterDeleteSuccess (T8) proves a successful uninstall returns no
+// error.
+func TestClusterDeleteSuccess(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{Stdout: "uninstalled"})
+
+	e := &external{ssh: newTestSSHClient(t, host, port), host: host, kube: newTestKubeClient()}
+	cr := newClusterCR("test-cluster", "v1.28.2+k3s1", "")
+
+	if _, err := e.Delete(context.Background(), cr); err != nil {
+		t.Fatalf("Delete: %v", err)
 	}
 }

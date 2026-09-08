@@ -81,6 +81,36 @@ const externalTimeout = 10 * time.Minute
 // merely eventually consistent after a successful create call) isn't
 // needed here.
 
+// External-Name Strategy
+//
+// Identity is spec.forProvider.host: the SSH connection target, and the
+// only field either Cluster or Node carries that addresses the remote
+// resource. Classified on the two identity axes:
+//
+//   - Assignment: deterministic. The caller supplies host before create;
+//     nothing is minted by the remote side.
+//   - Stability: stable. host is immutable (self == oldSelf, enforced by
+//     CEL) -- there is no update path that could rotate it, so it never
+//     behaves like a derived handle.
+//
+// Re-imaging the same address out-of-band (the box is wiped and
+// reinstalled while spec.forProvider.host stays the same) is NOT a new
+// resource under this model: identity here is address-based, not
+// content-derived, and the controller has no signal to distinguish a
+// re-image from the original install continuing to run. Observe's
+// existence probe (systemctl is-active over SSH) simply reports
+// not-active until k3s is reinstalled, and the same external-name
+// continues to address it -- that is the correct behaviour for a stable
+// identifier, not a limitation of it.
+//
+// managed.WithDeterministicExternalName(true) is set below, and Observe
+// keeps the external-name annotation in sync with host on every pass
+// (idempotent) rather than only at Create: the value is always knowable
+// from spec, and setting it before existence is even checked matches the
+// deterministic classification -- there is no pre-create guard, because
+// absence of the resource is exactly what the systemctl probe already
+// reports.
+
 // Setup adds a controller that reconciles cluster-scoped Node managed resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.NodeGroupKind)
@@ -93,6 +123,12 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
 		managed.WithTimeout(externalTimeout),
+		// host is deterministic and stable (see "External-Name Strategy"
+		// above), so it is always safe to re-queue and retry a Create that
+		// left the outcome ambiguous -- there is no risk of leaking a
+		// second, differently-named resource the way there would be for a
+		// server-assigned name.
+		managed.WithDeterministicExternalName(true),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))), //nolint:staticcheck // event.NewAPIRecorder still requires the legacy record.EventRecorder.
 		// The critical-annotation write that clears the pending-create marker
 		// after Create() must not inherit the context Create's own blocking
@@ -167,10 +203,19 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 		return nil, errors.Wrap(err, errNewClient)
 	}
 
-	serverHost, nodeToken, err := c.resolveClusterInfo(ctx, cr.Spec.ForProvider.ClusterRef.Name)
-	if err != nil {
-		sshClient.Close() //nolint:errcheck
-		return nil, err
+	// clusterRef is optional in the schema (required instead by a CEL rule
+	// gated on managementPolicies allowing Create or Update, per convention)
+	// so an Observe-only adoption carrying just host can pass admission.
+	// Skip resolution when it is absent: Observe never needs serverHost or
+	// nodeToken, only Create/Update do, and CEL already guarantees clusterRef
+	// is present whenever either of those can run.
+	var serverHost, nodeToken string
+	if cr.Spec.ForProvider.ClusterRef != nil {
+		serverHost, nodeToken, err = c.resolveClusterInfo(ctx, cr.Spec.ForProvider.ClusterRef.Name)
+		if err != nil {
+			sshClient.Close() //nolint:errcheck
+			return nil, err
+		}
 	}
 
 	return &external{
@@ -220,6 +265,13 @@ type external struct {
 }
 
 func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.ExternalObservation, error) {
+	// Identity is deterministic and known from spec before existence is
+	// even checked (see "External-Name Strategy" above) -- keep the
+	// annotation in sync on every pass rather than only setting it once.
+	if meta.GetExternalName(cr) != cr.Spec.ForProvider.Host {
+		meta.SetExternalName(cr, cr.Spec.ForProvider.Host)
+	}
+
 	service := "k3s-agent"
 	if e.role == "server" {
 		service = "k3s"
@@ -233,9 +285,38 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
-	cr.Status.AtProvider.Ready = true
-	cr.Status.AtProvider.Role = e.role
+	versionOut, _, _ := e.ssh.Execute(ctx, "k3s --version 2>/dev/null | head -1")
+
 	cr.SetConditions(xpv1.Available())
+
+	// The k3s join script reports no live configuration of its own, so the
+	// last-applied-config annotation is this provider's only source for
+	// the mutable fields' observed state (see nodeIsUpToDate and
+	// lastAppliedNodeConfig below). Immutable fields can never diverge
+	// from spec once the resource exists (CEL enforces it), so they mirror
+	// straight from spec.
+	last, hasLast, err := lastAppliedNodeConfig(cr)
+	if err != nil {
+		return managed.ExternalObservation{}, err
+	}
+
+	cr.Status.AtProvider = v1alpha1.NodeObservation{
+		Ready:      true,
+		Host:       cr.Spec.ForProvider.Host,
+		Port:       cr.Spec.ForProvider.Port,
+		Role:       e.role,
+		K3sVersion: versionOut,
+	}
+	// Uptest's import-recovery test compares this against the external-name
+	// recorded before status was cleared -- set as its own statement (not
+	// folded into the composite literal above) so the assignment stays
+	// mechanically greppable as the identity write it is.
+	cr.Status.AtProvider.ID = meta.GetExternalName(cr)
+	if hasLast {
+		cr.Status.AtProvider.K3sChannel = last.K3sChannel
+		cr.Status.AtProvider.ExtraArgs = last.ExtraArgs
+		cr.Status.AtProvider.TLSSAN = last.TLSSAN
+	}
 
 	upToDate, err := nodeIsUpToDate(cr)
 	if err != nil {
@@ -355,6 +436,24 @@ func mutableNodeFieldsOf(p v1alpha1.NodeParameters) mutableNodeFields {
 	}
 }
 
+// lastAppliedNodeConfig reads the mutable configuration this controller
+// most recently confirmed it applied. It reports (zero value, false, nil)
+// when nothing has been recorded yet -- freshly adopted, or created before
+// this annotation existed -- which is the honest answer for Observe's
+// atProvider mirror: there is nothing to report for those fields until this
+// controller has actually confirmed a value against the host.
+func lastAppliedNodeConfig(cr *v1alpha1.Node) (mutableNodeFields, bool, error) {
+	raw, ok := cr.GetAnnotations()[annotationLastAppliedConfig]
+	if !ok || raw == "" {
+		return mutableNodeFields{}, false, nil
+	}
+	var last mutableNodeFields
+	if err := json.Unmarshal([]byte(raw), &last); err != nil {
+		return mutableNodeFields{}, false, errors.Wrap(err, errUnmarshalLastApplied)
+	}
+	return last, true, nil
+}
+
 // nodeIsUpToDate compares the resource's mutable fields against the
 // configuration this controller last applied. The k3s join script never
 // returns the server's own configuration, so there is nothing to compare
@@ -364,13 +463,12 @@ func mutableNodeFieldsOf(p v1alpha1.NodeParameters) mutableNodeFields {
 // the join script is safe to re-run with the resource's own declared
 // configuration, and doing so once seeds the annotation.
 func nodeIsUpToDate(cr *v1alpha1.Node) (bool, error) {
-	raw, ok := cr.GetAnnotations()[annotationLastAppliedConfig]
-	if !ok || raw == "" {
-		return false, nil
+	last, ok, err := lastAppliedNodeConfig(cr)
+	if err != nil {
+		return false, err
 	}
-	var last mutableNodeFields
-	if err := json.Unmarshal([]byte(raw), &last); err != nil {
-		return false, errors.Wrap(err, errUnmarshalLastApplied)
+	if !ok {
+		return false, nil
 	}
 	return reflect.DeepEqual(last, mutableNodeFieldsOf(cr.Spec.ForProvider)), nil
 }
