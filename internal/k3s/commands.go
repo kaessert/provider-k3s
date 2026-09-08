@@ -225,10 +225,13 @@ type ServiceProbe struct {
 }
 
 // ParseServiceProbe splits the two-line reply ServiceProbeCommand's output
-// carries -- LoadState first, ActiveState second, matching the -p flag
-// order the command was built with -- into a ServiceProbe. A short or empty
-// reply (a probe that failed to run at all) leaves the corresponding field
-// empty, which Exists and Ready both already treat as "no".
+// carries -- LoadState first, ActiveState second -- into a ServiceProbe. That
+// order is systemd's own internal property order, NOT the order the -p flags
+// were given in: `systemctl show -p ActiveState -p LoadState --value` prints
+// exactly the same two lines in the same sequence, so reordering the flags in
+// ServiceProbeCommand would not reorder this reply. A short or empty reply (a
+// probe that failed to run at all) leaves the corresponding field empty, which
+// Exists and Ready both already treat as "no".
 func ParseServiceProbe(stdout string) ServiceProbe {
 	lines := strings.SplitN(strings.TrimSpace(stdout), "\n", 2)
 	probe := ServiceProbe{LoadState: strings.TrimSpace(lines[0])}
