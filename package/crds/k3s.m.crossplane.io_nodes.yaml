@@ -150,6 +150,9 @@ spec:
                     required:
                     - name
                     type: object
+                    x-kubernetes-validations:
+                    - message: clusterRef is immutable after creation
+                      rule: self == oldSelf
                   clusterSelector:
                     description: |-
                       ClusterSelector selects the Cluster resource this node joins, by
