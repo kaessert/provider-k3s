@@ -1,6 +1,6 @@
 module github.com/crossplane-contrib/provider-k3s
 
-go 1.26.3
+go 1.26.6
 
 tool sigs.k8s.io/controller-tools/cmd/controller-gen
 
@@ -12,7 +12,7 @@ require (
 	github.com/crossplane/crossplane/apis/v2 v2.4.0
 	github.com/google/go-cmp v0.7.0
 	github.com/pkg/errors v0.9.1
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	google.golang.org/grpc v1.83.2
 	k8s.io/api v0.37.0
 	k8s.io/apiextensions-apiserver v0.37.0
