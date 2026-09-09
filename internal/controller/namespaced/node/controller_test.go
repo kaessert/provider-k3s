@@ -45,8 +45,9 @@ const testNodeRoleAgent = "agent"
 const testIsActiveCmd = "systemctl show -p LoadState -p ActiveState --value k3s-agent 2>/dev/null"
 
 // testServerHost and testNodeToken are the connector-resolved cluster
-// identity shared by every test fixture in this file (the values Connect
-// would have produced from resolveClusterInfo).
+// identity shared by every fixture in this file that builds an *external
+// directly (bypassing Connect) or asserts on Connect's resolved output (the
+// values Connect would have produced from resolveClusterInfo).
 const (
 	testServerHost = "server.example.com"
 	testNodeToken  = "the-node-token"
@@ -54,7 +55,9 @@ const (
 
 // newTestKubeClient builds a fake kube client seeded with objs, for
 // exercising persistLastAppliedNodeConfig's conflict-safe read-modify-write
-// against a real (fake) API server rather than an in-memory struct.
+// against a real (fake) API server rather than an in-memory struct. The
+// corev1 scheme is required alongside this provider's own types because
+// Connect() reads a referenced Cluster's connection Secret directly.
 func newTestKubeClient(objs ...client.Object) client.Client {
 	s := runtime.NewScheme()
 	if err := v1alpha1.SchemeBuilder.AddToScheme(s); err != nil {
@@ -67,10 +70,12 @@ func newTestKubeClient(objs ...client.Object) client.Client {
 }
 
 func nodeParams(k3sVersion, extraArgs string) v1alpha1.NodeParameters {
+	cluster := "my-cluster"
 	return v1alpha1.NodeParameters{
 		Host:       "10.0.0.2",
 		Port:       22,
-		ClusterRef: &xpv2.Reference{Name: "my-cluster"},
+		Cluster:    &cluster,
+		ClusterRef: &xpv2.NamespacedReference{Name: "my-cluster"},
 		Role:       testNodeRoleAgent,
 		K3sVersion: k3sVersion,
 		K3sChannel: "stable",
@@ -154,7 +159,7 @@ func TestIsUpToDateIgnoresImmutableField(t *testing.T) {
 	// comparison itself does not depend on them.
 	cr.Spec.ForProvider.Role = "server"
 	cr.Spec.ForProvider.Host = "10.0.0.99"
-	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "someone-elses-cluster"}
+	cr.Spec.ForProvider.ClusterRef = &xpv2.NamespacedReference{Name: "someone-elses-cluster"}
 
 	upToDate, err := nodeIsUpToDate(cr)
 	if err != nil {
@@ -558,6 +563,9 @@ func TestObserveSuccessPopulatesFullMirror(t *testing.T) {
 	}
 	if !ap.Ready {
 		t.Error("want Ready true")
+	}
+	if ap.Cluster != *cr.Spec.ForProvider.Cluster {
+		t.Errorf("want Cluster mirrored from spec, got %q want %q", ap.Cluster, *cr.Spec.ForProvider.Cluster)
 	}
 	if ap.Host != cr.Spec.ForProvider.Host {
 		t.Errorf("want Host mirrored from spec, got %q want %q", ap.Host, cr.Spec.ForProvider.Host)

@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/namespaced/v1alpha1"
 )
@@ -109,8 +110,10 @@ func newTestConnectCR(host string, port int, uid string) *v1alpha1.Node {
 
 // TestConnectSuccess proves the "ProviderConfig" arm of the namespaced
 // Kind-routing switch: PC fetch scoped to the CR's own namespace, credential
-// extraction, SSH dial, and clusterRef resolution against the referenced
-// Cluster's connection secret -- succeeds end to end.
+// extraction, SSH dial, and cluster resolution against the referenced
+// Cluster's connection secret -- succeeds end to end. Cluster/ClusterRef
+// carry the values the reconciler's reference resolver would have already
+// written by the time Connect runs.
 func TestConnectSuccess(t *testing.T) {
 	sshHost, sshPort := startFakeSSHServer(t, nil, sshResponse{})
 
@@ -120,7 +123,8 @@ func TestConnectSuccess(t *testing.T) {
 	kube := newTestKubeClient(pc, secret, cluster, connSecret)
 
 	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
-	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "my-cluster"}
+	cr.Spec.ForProvider.Cluster = ptr.To("my-cluster")
+	cr.Spec.ForProvider.ClusterRef = &xpv2.NamespacedReference{Name: "my-cluster"}
 	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
@@ -164,7 +168,8 @@ func TestConnectClusterProviderConfigKindRouting(t *testing.T) {
 	kube := newTestKubeClient(cpc, secret, cluster, connSecret)
 
 	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
-	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "my-cluster"}
+	cr.Spec.ForProvider.Cluster = ptr.To("my-cluster")
+	cr.Spec.ForProvider.ClusterRef = &xpv2.NamespacedReference{Name: "my-cluster"}
 	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ClusterProviderConfig", Name: "test-cpc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
@@ -213,7 +218,8 @@ func TestConnectMissingClusterDoesNotFailConnect(t *testing.T) {
 	kube := newTestKubeClient(pc, secret) // deliberately no Cluster object
 
 	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
-	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "gone-cluster"}
+	cr.Spec.ForProvider.Cluster = ptr.To("gone-cluster")
+	cr.Spec.ForProvider.ClusterRef = &xpv2.NamespacedReference{Name: "gone-cluster"}
 	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
@@ -235,9 +241,10 @@ func TestConnectMissingClusterDoesNotFailConnect(t *testing.T) {
 	}
 }
 
-// TestConnectClusterRefOptionalForObserve proves clusterRef being absent
-// (a legal Observe-only adoption, per the root-level CEL rule that gates it
-// on managementPolicies allowing Create or Update) does not fail Connect.
+// TestConnectClusterRefOptionalForObserve proves the Cluster value being
+// unresolved (a legal Observe-only adoption, per the root-level CEL rule
+// that gates clusterRef/clusterSelector on managementPolicies allowing
+// Create or Update) does not fail Connect.
 func TestConnectClusterRefOptionalForObserve(t *testing.T) {
 	sshHost, sshPort := startFakeSSHServer(t, nil, sshResponse{})
 
@@ -246,7 +253,8 @@ func TestConnectClusterRefOptionalForObserve(t *testing.T) {
 	kube := newTestKubeClient(pc, secret)
 
 	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
-	cr.Spec.ForProvider.ClusterRef = nil // legal: Observe-only adoption
+	cr.Spec.ForProvider.Cluster = nil // legal: Observe-only adoption, not yet resolved
+	cr.Spec.ForProvider.ClusterRef = nil
 	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}

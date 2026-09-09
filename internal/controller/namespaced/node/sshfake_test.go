@@ -30,6 +30,10 @@ import (
 	sshclient "github.com/crossplane-contrib/provider-k3s/internal/clients/ssh"
 )
 
+// testSSHPassword is the shared literal fed to the fake SSH server (which
+// accepts any credential) across every fixture in this package.
+const testSSHPassword = "test"
+
 // sshResponse is the canned reply fakeSSHServer sends back for one exec
 // command. A non-zero Delay holds the reply for that long before sending it
 // -- or abandons it early, without replying, if the client tears the session
@@ -200,8 +204,8 @@ func newTestSSHClient(t *testing.T, host string, port int) *sshclient.Client {
 	c, err := sshclient.NewClient(sshclient.Config{
 		Host:     host,
 		Port:     port,
-		Username: "test",
-		Password: "test",
+		Username: testSSHPassword,
+		Password: testSSHPassword,
 	})
 	if err != nil {
 		t.Fatalf("sshclient.NewClient: %v", err)

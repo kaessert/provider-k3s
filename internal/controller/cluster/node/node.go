@@ -119,6 +119,10 @@ const externalTimeout = 10 * time.Minute
 // reports.
 
 // Setup adds a controller that reconciles cluster-scoped Node managed resources.
+//
+// +kubebuilder:rbac:groups=k3s.crossplane.io,resources=nodes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=k3s.crossplane.io,resources=nodes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=k3s.crossplane.io,resources=clusters,verbs=get;list;watch
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.NodeGroupKind)
 
@@ -210,12 +214,16 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 		return nil, errors.Wrap(err, errNewClient)
 	}
 
-	// clusterRef is optional in the schema (required instead by a CEL rule
-	// gated on managementPolicies allowing Create or Update, per convention)
-	// so an Observe-only adoption carrying just host can pass admission.
-	// Skip resolution when it is absent: Observe never needs serverHost or
-	// nodeToken, only Create/Update do, and CEL already guarantees clusterRef
-	// is present whenever either of those can run.
+	// clusterRef/clusterSelector is optional in the schema (required instead
+	// by a CEL rule gated on managementPolicies allowing Create or Update,
+	// per convention) so an Observe-only adoption carrying just host can
+	// pass admission. The reconciler resolves ClusterRef/ClusterSelector
+	// into the Cluster value before Connect runs (Node implements
+	// ResolveReferences), so by the time Create/Update needs it resolution
+	// has already happened -- CEL already guarantees one of clusterRef or
+	// clusterSelector is present whenever either write path can run. Skip
+	// resolution when Cluster is still unset: Observe never needs
+	// serverHost or nodeToken, only Create/Update do.
 	//
 	// A resolution failure (most commonly: the referenced Cluster was
 	// deleted) must NOT fail Connect(): Observe and Delete never need
@@ -227,8 +235,8 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 	// serverHost/nodeToken -- fail loudly on it themselves.
 	var serverHost, nodeToken string
 	var clusterErr error
-	if cr.Spec.ForProvider.ClusterRef != nil {
-		serverHost, nodeToken, clusterErr = c.resolveClusterInfo(ctx, cr.Spec.ForProvider.ClusterRef.Name)
+	if cr.Spec.ForProvider.Cluster != nil && *cr.Spec.ForProvider.Cluster != "" {
+		serverHost, nodeToken, clusterErr = c.resolveClusterInfo(ctx, *cr.Spec.ForProvider.Cluster)
 	}
 
 	return &external{
@@ -341,6 +349,12 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 	// folded into the composite literal above) so the assignment stays
 	// mechanically greppable as the identity write it is.
 	cr.Status.AtProvider.ID = meta.GetExternalName(cr)
+	// Cluster is *string in spec (unset on an Observe-only adoption that
+	// has not resolved a reference yet) -- mirror it only once resolved,
+	// rather than reporting an empty string as if it had been confirmed.
+	if cr.Spec.ForProvider.Cluster != nil {
+		cr.Status.AtProvider.Cluster = *cr.Spec.ForProvider.Cluster
+	}
 	if hasLast {
 		cr.Status.AtProvider.K3sChannel = last.K3sChannel
 		cr.Status.AtProvider.ExtraArgs = last.ExtraArgs
@@ -393,9 +407,9 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot join k3s cluster: %s", stderr)
+		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot join k3s cluster: %s", redactedStderr)
 	}
 
 	if err := persistLastAppliedNodeConfig(ctx, e.kube, cr); err != nil {
@@ -424,9 +438,9 @@ func (e *external) Update(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s node: %s", stderr)
+		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s node: %s", redactedStderr)
 	}
 
 	if err := persistLastAppliedNodeConfig(ctx, e.kube, cr); err != nil {
@@ -466,9 +480,9 @@ func (e *external) Delete(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 		cmd = k3s.UninstallAgentCommand()
 	}
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", stderr)
+		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", redactedStderr)
 	}
 
 	return managed.ExternalDelete{}, nil

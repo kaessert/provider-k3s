@@ -367,9 +367,9 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Cluster) (managed.Ex
 
 	cmd := k3s.InstallCommand(installParamsFor(cr.Spec.ForProvider))
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot install k3s: %s", stderr)
+		return managed.ExternalCreation{}, errors.Wrapf(err, "cannot install k3s: %s", redactedStderr)
 	}
 
 	if err := persistLastAppliedClusterConfig(ctx, e.kube, cr); err != nil {
@@ -389,9 +389,9 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Cluster) (managed.Ex
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalUpdate, error) {
 	cmd := k3s.InstallCommand(installParamsFor(cr.Spec.ForProvider))
 
-	_, stderr, err := e.ssh.Execute(ctx, cmd)
+	_, redactedStderr, err := e.ssh.Execute(ctx, cmd)
 	if err != nil {
-		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s: %s", stderr)
+		return managed.ExternalUpdate{}, errors.Wrapf(err, "cannot reconfigure k3s: %s", redactedStderr)
 	}
 
 	if err := persistLastAppliedClusterConfig(ctx, e.kube, cr); err != nil {
@@ -424,9 +424,9 @@ func installParamsFor(p v1alpha1.ClusterParameters) k3s.InstallParams {
 func (e *external) Delete(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalDelete, error) {
 	cr.SetConditions(xpv2.Deleting())
 
-	_, stderr, err := e.ssh.Execute(ctx, k3s.UninstallServerCommand())
+	_, redactedStderr, err := e.ssh.Execute(ctx, k3s.UninstallServerCommand())
 	if err != nil {
-		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", stderr)
+		return managed.ExternalDelete{}, errors.Wrapf(err, "cannot uninstall k3s: %s", redactedStderr)
 	}
 
 	return managed.ExternalDelete{}, nil

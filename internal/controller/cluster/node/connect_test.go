@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/cluster/v1alpha1"
 )
@@ -81,8 +82,11 @@ func newTestClusterWithConnSecret(name, host, connSecretName string) (*v1alpha1.
 // cluster-scoped Connect resolves its ProviderConfig with a plain
 // types.NamespacedName{Name: ref.Name}, no namespace and no Kind routing)
 // proves the full path -- ProviderConfig fetch, credential extraction, SSH
-// dial, and clusterRef resolution against the referenced Cluster's
-// connection secret -- succeeds end to end.
+// dial, and cluster resolution against the referenced Cluster's connection
+// secret -- succeeds end to end. Cluster carries the value the reconciler's
+// reference resolver would have already written by the time Connect runs
+// (see "External-Name Strategy" and ResolveReferences); ClusterRef is set
+// alongside it exactly as the resolver would leave it.
 func TestConnectSuccess(t *testing.T) {
 	sshHost, sshPort := startFakeSSHServer(t, nil, sshResponse{})
 
@@ -95,6 +99,7 @@ func TestConnectSuccess(t *testing.T) {
 	cr.SetUID(types.UID("test-uid"))
 	cr.Spec.ForProvider.Host = sshHost
 	cr.Spec.ForProvider.Port = sshPort
+	cr.Spec.ForProvider.Cluster = ptr.To("my-cluster")
 	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "my-cluster"}
 	cr.SetProviderConfigReference(&xpv2.Reference{Name: "test-pc"})
 
@@ -149,6 +154,7 @@ func TestConnectMissingClusterDoesNotFailConnect(t *testing.T) {
 	cr.SetUID(types.UID("test-uid"))
 	cr.Spec.ForProvider.Host = sshHost
 	cr.Spec.ForProvider.Port = sshPort
+	cr.Spec.ForProvider.Cluster = ptr.To("gone-cluster")
 	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "gone-cluster"}
 	cr.SetProviderConfigReference(&xpv2.Reference{Name: "test-pc"})
 
@@ -171,11 +177,12 @@ func TestConnectMissingClusterDoesNotFailConnect(t *testing.T) {
 	}
 }
 
-// TestConnectClusterRefOptionalForObserve proves clusterRef being absent
-// (a legal Observe-only adoption, per the root-level CEL rule that gates it
-// on managementPolicies allowing Create or Update) does not fail Connect --
-// Observe never needs the resolved server host or node token, so
-// resolution is skipped rather than erroring.
+// TestConnectClusterRefOptionalForObserve proves the Cluster value being
+// unresolved (a legal Observe-only adoption, per the root-level CEL rule
+// that gates clusterRef/clusterSelector on managementPolicies allowing
+// Create or Update) does not fail Connect -- Observe never needs the
+// resolved server host or node token, so resolution is skipped rather than
+// erroring.
 func TestConnectClusterRefOptionalForObserve(t *testing.T) {
 	sshHost, sshPort := startFakeSSHServer(t, nil, sshResponse{})
 
@@ -187,7 +194,8 @@ func TestConnectClusterRefOptionalForObserve(t *testing.T) {
 	cr.SetUID(types.UID("test-uid"))
 	cr.Spec.ForProvider.Host = sshHost
 	cr.Spec.ForProvider.Port = sshPort
-	cr.Spec.ForProvider.ClusterRef = nil // legal: Observe-only adoption
+	cr.Spec.ForProvider.Cluster = nil // legal: Observe-only adoption, not yet resolved
+	cr.Spec.ForProvider.ClusterRef = nil
 	cr.SetProviderConfigReference(&xpv2.Reference{Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewLegacyProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
