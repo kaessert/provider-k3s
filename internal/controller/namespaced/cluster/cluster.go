@@ -37,7 +37,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/statemetrics"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/namespaced/v1alpha1"
 	sshclient "github.com/crossplane-contrib/provider-k3s/internal/clients/ssh"
@@ -277,9 +277,9 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Cluster) (managed.E
 	// in place from a prior pass (an Update-driven restart, or a flapping
 	// unit, can revisit this path after Available was already set once).
 	if ready {
-		cr.SetConditions(xpv1.Available())
+		cr.SetConditions(xpv2.Available())
 	} else {
-		cr.SetConditions(xpv1.Creating())
+		cr.SetConditions(xpv2.Creating())
 	}
 
 	// The k3s install script reports no live configuration of its own, so
@@ -363,7 +363,7 @@ func clusterConnectionDetails(host, kubeconfig, nodeToken string) managed.Connec
 }
 
 func (e *external) Create(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalCreation, error) {
-	cr.SetConditions(xpv1.Creating())
+	cr.SetConditions(xpv2.Creating())
 
 	cmd := k3s.InstallCommand(installParamsFor(cr.Spec.ForProvider))
 
@@ -422,7 +422,7 @@ func installParamsFor(p v1alpha1.ClusterParameters) k3s.InstallParams {
 }
 
 func (e *external) Delete(ctx context.Context, cr *v1alpha1.Cluster) (managed.ExternalDelete, error) {
-	cr.SetConditions(xpv1.Deleting())
+	cr.SetConditions(xpv2.Deleting())
 
 	_, stderr, err := e.ssh.Execute(ctx, k3s.UninstallServerCommand())
 	if err != nil {

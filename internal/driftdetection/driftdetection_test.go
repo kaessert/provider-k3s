@@ -26,7 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/cluster/v1alpha1"
 	dd "github.com/crossplane-contrib/provider-k3s/apis/common/driftdetection"
@@ -484,7 +484,7 @@ func TestEligibilityRejectsWriteOnlyFieldOnRealResource(t *testing.T) {
 	cr.Spec.DriftDetection = config(dd.ModeEnabled, "forProvider.clusterRef")
 	cr.Spec.ForProvider = v1alpha1.NodeParameters{
 		Host:       testHost,
-		ClusterRef: &xpv1.Reference{Name: "some-cluster"},
+		ClusterRef: &xpv2.Reference{Name: "some-cluster"},
 		Role:       "agent",
 	}
 	if _, err := ReadConfig(cr); err == nil {

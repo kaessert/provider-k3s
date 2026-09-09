@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	"github.com/crossplane-contrib/provider-k3s/apis/common/driftdetection"
 )
@@ -54,7 +54,7 @@ type NodeParameters struct {
 	// not attempt as an in-place update.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="clusterRef is immutable after creation"
-	ClusterRef *xpv1.Reference `json:"clusterRef,omitempty"`
+	ClusterRef *xpv2.Reference `json:"clusterRef,omitempty"`
 
 	// Role is the role of this node: "agent" (worker) or "server" (additional control plane).
 	// Required when managementPolicies allows Create or Update (see the
@@ -130,7 +130,7 @@ type NodeObservation struct {
 
 // A NodeSpec defines the desired state of a Node.
 type NodeSpec struct {
-	xpv1.ClusterManagedResourceSpec `json:",inline"`
+	xpv2.ClusterManagedResourceSpec `json:",inline"`
 
 	// DriftDetection configures which forProvider fields are owned outside
 	// Crossplane and how drift in those fields is detected and corrected.
@@ -144,7 +144,7 @@ type NodeSpec struct {
 
 // A NodeStatus represents the observed state of a Node.
 type NodeStatus struct {
-	xpv1.ManagedResourceStatus `json:",inline"`
+	xpv2.ManagedResourceStatus `json:",inline"`
 	AtProvider                 NodeObservation `json:"atProvider,omitempty"`
 }
 

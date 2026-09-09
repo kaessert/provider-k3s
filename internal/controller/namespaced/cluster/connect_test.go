@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -43,10 +43,10 @@ func newTestProviderConfig(name, secretName string) *v1alpha1.ProviderConfig {
 	pc.Spec = v1alpha1.ProviderConfigSpec{
 		Username: "test",
 		Credentials: v1alpha1.ProviderCredentials{
-			Source: xpv1.CredentialsSourceSecret,
-			CommonCredentialSelectors: xpv1.CommonCredentialSelectors{
-				SecretRef: &xpv1.SecretKeySelector{
-					SecretReference: xpv1.SecretReference{Name: secretName, Namespace: testNamespace},
+			Source: xpv2.CredentialsSourceSecret,
+			CommonCredentialSelectors: xpv2.CommonCredentialSelectors{
+				SecretRef: &xpv2.SecretKeySelector{
+					SecretReference: xpv2.SecretReference{Name: secretName, Namespace: testNamespace},
 					Key:             "password",
 				},
 			},
@@ -61,10 +61,10 @@ func newTestClusterProviderConfig(name, secretName string) *v1alpha1.ClusterProv
 	cpc.Spec = v1alpha1.ProviderConfigSpec{
 		Username: "test",
 		Credentials: v1alpha1.ProviderCredentials{
-			Source: xpv1.CredentialsSourceSecret,
-			CommonCredentialSelectors: xpv1.CommonCredentialSelectors{
-				SecretRef: &xpv1.SecretKeySelector{
-					SecretReference: xpv1.SecretReference{Name: secretName, Namespace: testNamespace},
+			Source: xpv2.CredentialsSourceSecret,
+			CommonCredentialSelectors: xpv2.CommonCredentialSelectors{
+				SecretRef: &xpv2.SecretKeySelector{
+					SecretReference: xpv2.SecretReference{Name: secretName, Namespace: testNamespace},
 					Key:             "password",
 				},
 			},
@@ -100,7 +100,7 @@ func TestConnectSuccess(t *testing.T) {
 	kube := newTestKubeClient(pc, secret)
 
 	cr := newTestConnectCR(host, port, "test-uid")
-	cr.SetProviderConfigReference(&xpv1.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -119,7 +119,7 @@ func TestConnectProviderConfigNotFound(t *testing.T) {
 	kube := newTestKubeClient()
 
 	cr := newTestConnectCR("10.0.0.1", 22, "test-uid")
-	cr.SetProviderConfigReference(&xpv1.ProviderConfigReference{Kind: "ProviderConfig", Name: "missing-pc"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "missing-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -143,7 +143,7 @@ func TestConnectClusterProviderConfigKindRouting(t *testing.T) {
 	kube := newTestKubeClient(cpc, secret)
 
 	cr := newTestConnectCR(host, port, "test-uid")
-	cr.SetProviderConfigReference(&xpv1.ProviderConfigReference{Kind: "ClusterProviderConfig", Name: "test-cpc"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ClusterProviderConfig", Name: "test-cpc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -163,7 +163,7 @@ func TestConnectUnsupportedProviderConfigKind(t *testing.T) {
 	kube := newTestKubeClient()
 
 	cr := newTestConnectCR("10.0.0.1", 22, "test-uid")
-	cr.SetProviderConfigReference(&xpv1.ProviderConfigReference{Kind: "SomeOtherKind", Name: "whatever"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "SomeOtherKind", Name: "whatever"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 

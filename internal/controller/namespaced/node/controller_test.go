@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/meta"
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -70,7 +70,7 @@ func nodeParams(k3sVersion, extraArgs string) v1alpha1.NodeParameters {
 	return v1alpha1.NodeParameters{
 		Host:       "10.0.0.2",
 		Port:       22,
-		ClusterRef: &xpv1.Reference{Name: "my-cluster"},
+		ClusterRef: &xpv2.Reference{Name: "my-cluster"},
 		Role:       testNodeRoleAgent,
 		K3sVersion: k3sVersion,
 		K3sChannel: "stable",
@@ -154,7 +154,7 @@ func TestIsUpToDateIgnoresImmutableField(t *testing.T) {
 	// comparison itself does not depend on them.
 	cr.Spec.ForProvider.Role = "server"
 	cr.Spec.ForProvider.Host = "10.0.0.99"
-	cr.Spec.ForProvider.ClusterRef = &xpv1.Reference{Name: "someone-elses-cluster"}
+	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "someone-elses-cluster"}
 
 	upToDate, err := nodeIsUpToDate(cr)
 	if err != nil {
@@ -398,7 +398,7 @@ func TestObserveInstalledButNotRunningIsNotResourceNotFound(t *testing.T) {
 			if cr.Status.AtProvider.Ready {
 				t.Errorf("want Ready false: ActiveState is %q, not active", activeState)
 			}
-			if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+			if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason != xpv2.ReasonCreating {
 				t.Errorf("want Creating condition set while not ready, got reason %q", cond.Reason)
 			}
 		})
@@ -436,10 +436,10 @@ func TestObserveConvergingIsNotResourceNotFound(t *testing.T) {
 	if cr.Status.AtProvider.Ready {
 		t.Error("want Ready false: the service has not reported active yet")
 	}
-	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason == xpv1.ReasonAvailable {
+	if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason == xpv2.ReasonAvailable {
 		t.Error("want no Available condition set while the service is still converging")
 	}
-	if cond := cr.GetCondition(xpv1.TypeReady); cond.Reason != xpv1.ReasonCreating {
+	if cond := cr.GetCondition(xpv2.TypeReady); cond.Reason != xpv2.ReasonCreating {
 		t.Errorf("want Creating condition explicitly set while converging, got reason %q", cond.Reason)
 	}
 }

@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	xpv1 "github.com/crossplane/crossplane/apis/v2/core/v2"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 
 	"github.com/crossplane-contrib/provider-k3s/apis/common/driftdetection"
 )
@@ -146,7 +146,7 @@ type ClusterObservation struct {
 
 // A ClusterSpec defines the desired state of a Cluster.
 type ClusterSpec struct {
-	xpv1.ClusterManagedResourceSpec `json:",inline"`
+	xpv2.ClusterManagedResourceSpec `json:",inline"`
 
 	// DriftDetection configures which forProvider fields are owned outside
 	// Crossplane and how drift in those fields is detected and corrected.
@@ -160,7 +160,7 @@ type ClusterSpec struct {
 
 // A ClusterStatus represents the observed state of a Cluster.
 type ClusterStatus struct {
-	xpv1.ManagedResourceStatus `json:",inline"`
+	xpv2.ManagedResourceStatus `json:",inline"`
 	AtProvider                 ClusterObservation `json:"atProvider,omitempty"`
 }
 
