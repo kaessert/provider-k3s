@@ -204,6 +204,11 @@ This provider is built on top of the patterns established by
 foundational approach of installing and joining k3s clusters over SSH, which this
 provider adapts into the Crossplane reconciliation model.
 
+## Releases and Support
+
+See [RELEASES.md](RELEASES.md) for the versioning scheme, which releases are
+supported, and what changes across an upgrade or a downgrade.
+
 ## Developing
 
 1. Run `make submodules` to initialize the "build" Make submodule.
