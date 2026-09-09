@@ -358,8 +358,20 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 	}
 
 	return managed.ExternalObservation{
-		ResourceExists:   true,
-		ResourceUpToDate: upToDate,
+		ResourceExists: true,
+		// Readiness is part of desired state, not a side channel: a unit
+		// stuck loaded-but-never-active (the agent can never reach a
+		// server that itself never becomes ready) must never be reported
+		// up to date, or it is silently indistinguishable from a healthy,
+		// converged node -- crossplane-runtime logs "external resource is
+		// up to date" every poll and takes no further action, forever.
+		// Gating on ready here means Update dispatches the join script
+		// again on every not-ready poll -- safe, since the script is
+		// idempotent and safe to re-run (see nodeIsUpToDate) -- so a
+		// stuck node keeps producing visible reconcile activity instead
+		// of silence. ResourceExists staying true (unaffected by ready)
+		// is what keeps this from reopening the create loop.
+		ResourceUpToDate: ready && upToDate,
 		// No server-defaulted spec fields to backfill: port and k3sChannel
 		// already carry kubebuilder defaults the API server fills in before
 		// this controller ever observes the resource, and the k3s join
