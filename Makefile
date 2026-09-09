@@ -182,6 +182,50 @@ $(UPTEST):
 	@chmod +x $(UPTEST)
 	@$(OK) installing uptest fork $(UPTEST_FORK_REF)
 
+# uptest's built-in default process budget is 1200s, shorter than this
+# fixture's own slowest single object: a from-scratch k3s server install over
+# SSH runs long enough on a nested/systemd-in-container host to exceed it.
+# Capped at the e2e-semaphore slot TTL (5400s) -- a longer budget does not buy
+# a longer run, it buys an unprotected one.
+UPTEST_DEFAULT_TIMEOUT ?= 5400s
+
+# Minimum free space (GB) required on / before an E2E run starts. A full disk
+# fails E2E as a bogus PROVIDER error 30+ minutes into the run instead of
+# failing fast up front. Overridable, e.g. `make e2e-preflight E2E_MIN_FREE_GB=5`
+# for a quick local smoke check.
+E2E_MIN_FREE_GB ?= 15
+
+# E2E preflight: this provider needs no external credentials -- the SSH
+# nodepool fixture (cluster/local/setup.sh) generates and supplies its own
+# keypair. Validate the local toolchain and disk space instead of any
+# credential env var.
+e2e-preflight: ## Validate E2E prerequisites
+	@FREE=$$(df -BG --output=avail / | tail -1 | tr -dc '0-9'); \
+	if [ "$$FREE" -lt "$(E2E_MIN_FREE_GB)" ]; then \
+	  echo "ERROR: only $${FREE}GB free on / — E2E needs >= $(E2E_MIN_FREE_GB)GB." >&2; \
+	  echo "  A full disk fails E2E as a bogus PROVIDER error 30+ minutes from now." >&2; \
+	  echo "  Reclaim: docker image prune -f; rm -rf /tmp/tmp.* /tmp/go-build*;" >&2; \
+	  echo "           trim \$$(go env GOCACHE) (oldest-first, keep it under ~30GB)." >&2; \
+	  exit 1; \
+	fi; \
+	echo "e2e-preflight: $${FREE}GB free on / (minimum $(E2E_MIN_FREE_GB)GB)"
+	@command -v docker >/dev/null 2>&1 || { echo "ERROR: docker is required to run the kind E2E cluster" >&2; exit 1; }
+	@docker info >/dev/null 2>&1 || { echo "ERROR: docker daemon is not reachable" >&2; exit 1; }
+	@echo "e2e-preflight: no external credentials required (the SSH nodepool fixture supplies its own keys)"
+
+# e2e-preflight must gate the chain, not trail it: `e2e: e2e-preflight` would
+# only append to the recipe-less `e2e` target's prerequisite list and run
+# LAST, after the very run it exists to prevent. `build` has its own recipe
+# and is the first prerequisite reached by every E2E entry point below, so
+# attaching the guard here lets it abort before any image build or kind
+# cluster is created. Filtered on the top-level goal so a plain `make build`
+# never gains a disk/toolchain preflight: `e2e.%` covers every per-resource
+# target (e2e.cluster, e2e.node, e2e.node-delete-order) alongside the bare
+# `e2e` aggregate.
+build: $(if $(filter e2e e2e.%,$(MAKECMDGOALS)),e2e-preflight,)
+
+.PHONY: e2e-preflight
+
 # Cluster is a SINGLETON at the external-infrastructure layer: its
 # cluster-scoped and namespaced example both install a k3s server on the
 # SAME host (k3s-nodepool-0), so they cannot run in one uptest pass — they
@@ -213,7 +257,7 @@ UPTEST_MANIFESTS_CORE := $(UPTEST_MANIFESTS_NODE_NS)
 UPTEST_EXAMPLE_LIST ?= $(UPTEST_MANIFESTS_CORE)
 uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
 	@$(INFO) running automated tests
-	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh || $(FAIL)
+	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh --default-timeout=$(UPTEST_DEFAULT_TIMEOUT) || $(FAIL)
 	@$(OK) running automated tests
 
 # DRC_FILE is read directly by local.xpkg.deploy.provider.% (build/makelib/
@@ -249,12 +293,35 @@ e2e.cluster:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_CLUSTER)
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_NS)
 
+# e2e.node-delete-order: proves the Node delete-wedge fix survives, by
+# exercising the ONE delete order `make e2e` cannot reach on its own --
+# examples/node/testhooks/delete-node-namespaced.sh is the Cluster's own
+# pre-delete-hook, so a standard uptest run always deletes every Node before
+# its Cluster. This target runs a normal namespaced Node pass first (Node's
+# own bundled Cluster prerequisite, Node-first delete ordering unchanged),
+# then reuses the still-live kind cluster and k3s-nodepool fixture to
+# re-apply the same namespaced pair, delete the Cluster FIRST, delete the
+# Node second, and assert the Node clears its finalizer. Reuses
+# UPTEST_MANIFESTS_NODE_NS rather than composing a fresh comma-pair: that
+# variable already names the one file bundling both objects, so reusing it
+# cannot double-apply the Cluster the way a
+# cluster-namespaced.yaml,node-namespaced.yaml concatenation would. Not part
+# of the default `make e2e`/`make e2e.node` runs -- a deliberately separate,
+# explicitly-invoked target, run whenever the Node controller's Connect()
+# changes.
+e2e.node-delete-order:
+	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_NS)
+	@$(INFO) node-delete-order-check: exercising Cluster-deleted-BEFORE-Node
+	@KUBECTL=$(KUBECTL) ./cluster/local/node-delete-order-check.sh
+	@$(OK) node-delete-order-check passed
+
 e2e.node:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_CLUSTER)
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_NS)
 
 .PHONY: e2e.cluster
 .PHONY: e2e.node
+.PHONY: e2e.node-delete-order
 
 # Update the submodules, such as the common build scripts.
 submodules:
