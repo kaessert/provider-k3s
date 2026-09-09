@@ -1,0 +1,7 @@
+for: k3s.m.crossplane.io/v1alpha1/Cluster
+# A live run (2026-09-08) measured this SSH-based k3s server install
+# (download + systemd unit + readiness wait) at 19m25s (1165s) on a
+# nested/systemd-in-container test host -- against the 1200s shared
+# default assert window that leaves only ~35s of margin. This value
+# gives ~635s of margin over the observed duration.
+uptest.upbound.io/timeout: "1800"
