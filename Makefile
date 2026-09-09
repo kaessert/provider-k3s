@@ -182,12 +182,33 @@ $(UPTEST):
 	@chmod +x $(UPTEST)
 	@$(OK) installing uptest fork $(UPTEST_FORK_REF)
 
-# UPTEST_MANIFESTS_<RESOURCE> is the comma-separated pair of the
-# cluster-scoped and namespaced example for that resource, so
-# `make e2e.<resource>` exercises both scopes in a single uptest run.
-UPTEST_MANIFESTS_CLUSTER := examples/cluster/cluster.yaml,examples/cluster/cluster-namespaced.yaml
-UPTEST_MANIFESTS_NODE := examples/node/node.yaml,examples/node/node-namespaced.yaml
-UPTEST_MANIFESTS_CORE := $(UPTEST_MANIFESTS_CLUSTER),$(UPTEST_MANIFESTS_NODE)
+# Cluster is a SINGLETON at the external-infrastructure layer: its
+# cluster-scoped and namespaced example both install a k3s server on the
+# SAME host (k3s-nodepool-0), so they cannot run in one uptest pass — they
+# would race installing the same server. Node's own example bundles that
+# same Cluster as a prerequisite (so `make e2e.node` can stand alone
+# without depending on the Cluster target), and each Node scope variant
+# embeds a differently-scoped copy of it, so for the identical reason the
+# Node scope pair also cannot share one pass. Both resources therefore run
+# as two SEQUENTIAL uptest passes below rather than one comma-joined list.
+# GATED: the E2E fixture provisions only two nodepool hosts, and CORE's one
+# manifest (node-namespaced.yaml, below) already claims host k3s-nodepool-0
+# for its own bundled Cluster prerequisite — no spare host exists to run
+# either Cluster example in the same default pass. Use `make e2e.cluster`.
+UPTEST_MANIFESTS_CLUSTER_CLUSTER := examples/cluster/cluster.yaml
+UPTEST_MANIFESTS_CLUSTER_NS := examples/cluster/cluster-namespaced.yaml
+UPTEST_MANIFESTS_NODE_CLUSTER := examples/node/node.yaml
+UPTEST_MANIFESTS_NODE_NS := examples/node/node-namespaced.yaml
+
+# CORE: the default `make e2e` run. Only the namespaced Node example is
+# included — it already bundles its own Cluster prerequisite, so this one
+# pass exercises both resources' basic lifecycle. Folding in the
+# cluster-scoped Node variant or either standalone Cluster example would
+# either apply the same Cluster object twice in one pass or install two k3s
+# servers on the same host concurrently — both avoided by keeping CORE to
+# this one manifest and reaching the other scope/resource combinations only
+# through the dedicated sequential-pass targets below.
+UPTEST_MANIFESTS_CORE := $(UPTEST_MANIFESTS_NODE_NS)
 
 UPTEST_EXAMPLE_LIST ?= $(UPTEST_MANIFESTS_CORE)
 uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
@@ -195,22 +216,42 @@ uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
 	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh || $(FAIL)
 	@$(OK) running automated tests
 
-local-deploy: build controlplane.up $(YQ)
-	$(MAKE) local.xpkg.deploy.provider.$(PROJECT_NAME) DRC_FILE="./examples/deploymentruntimeconfig.yaml" && \
-	$(INFO) running locally built provider && \
-	$(KUBECTL) wait provider.pkg $(PROJECT_NAME) --for condition=Healthy --timeout 5m && \
-	$(KUBECTL) -n $(CROSSPLANE_NAMESPACE) wait --for=condition=Available deployment --all --timeout=5m && \
-	$(OK) running locally built provider
+# DRC_FILE is read directly by local.xpkg.deploy.provider.% (build/makelib/
+# local.xpkg.mk) — set as a target-specific variable here (GNU Make
+# propagates it to this target's prerequisites) rather than passed via a
+# recursive `$(MAKE) local.xpkg.deploy.provider... DRC_FILE=...` recipe
+# call. A recipe line that contains the literal text $(MAKE) is executed by
+# GNU Make for real even under `make -n`, precisely so a recursive submake
+# can inherit the -n flag and keep dry-running; but any OTHER shell command
+# chained onto that same recipe line with `&&` is NOT covered by that
+# propagation and runs for real regardless. This target used to chain two
+# `kubectl wait` calls onto exactly such a line, so `make -n e2e.<slug>`
+# ran them against a cluster that does not exist and aborted the whole
+# dry-run before ever reaching the `uptest` recipe that names the manifest
+# set. Listing the deploy target as an ordinary prerequisite instead keeps
+# every recipe line here free of $(MAKE), so `make -n` only ever prints.
+local-deploy: DRC_FILE := ./examples/deploymentruntimeconfig.yaml
+local-deploy: build controlplane.up $(YQ) local.xpkg.deploy.provider.$(PROJECT_NAME)
+	@$(INFO) running locally built provider
+	@$(KUBECTL) wait provider.pkg $(PROJECT_NAME) --for condition=Healthy --timeout 5m
+	@$(KUBECTL) -n $(CROSSPLANE_NAMESPACE) wait --for=condition=Available deployment --all --timeout=5m
+	@$(OK) running locally built provider
 
 e2e: local-deploy uptest
 
-# Per-resource targets — `make e2e.<resource>` runs just that resource's
-# cluster-scoped and namespaced examples together.
-e2e.cluster: UPTEST_EXAMPLE_LIST = $(UPTEST_MANIFESTS_CLUSTER)
-e2e.cluster: e2e
+# Per-resource targets — each singleton Cluster/Node scope pair runs as two
+# SEQUENTIAL uptest passes (never comma-joined into one UPTEST_EXAMPLE_LIST)
+# because both variants install a k3s server on the same external host and
+# would otherwise race. Each recipe line here is bare `$(MAKE) e2e ...` with
+# nothing else chained onto it, so — like local-deploy above — `make -n`
+# stays safe: the recursive submake inherits -n and only prints its own plan.
+e2e.cluster:
+	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_CLUSTER)
+	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_NS)
 
-e2e.node: UPTEST_EXAMPLE_LIST = $(UPTEST_MANIFESTS_NODE)
-e2e.node: e2e
+e2e.node:
+	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_CLUSTER)
+	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_NS)
 
 .PHONY: e2e.cluster
 .PHONY: e2e.node
