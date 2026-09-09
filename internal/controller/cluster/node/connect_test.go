@@ -149,8 +149,8 @@ func TestConnectMissingClusterDoesNotFailConnect(t *testing.T) {
 	cr.SetUID(types.UID("test-uid"))
 	cr.Spec.ForProvider.Host = sshHost
 	cr.Spec.ForProvider.Port = sshPort
-	cr.Spec.ForProvider.ClusterRef = &xpv1.Reference{Name: "gone-cluster"}
-	cr.SetProviderConfigReference(&xpv1.Reference{Name: "test-pc"})
+	cr.Spec.ForProvider.ClusterRef = &xpv2.Reference{Name: "gone-cluster"}
+	cr.SetProviderConfigReference(&xpv2.Reference{Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewLegacyProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
