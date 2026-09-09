@@ -242,13 +242,25 @@ jobs:
       # --only-fixed is deliberately NOT used: vulnerabilities with no
       # upstream fix still block a release, and are waived individually via
       # VEX rather than ignored as a class.
+      #
+      # Build/tool caches MUST be excluded: `grype dir:.` walks every file
+      # including third-party binaries the Makefile downloads into
+      # git-ignored dirs, and findings traced to those binaries are
+      # unactionable (the fix owner cannot bump a dependency inside a
+      # prebuilt lint binary that never ships in the provider image) and
+      # order-dependent (clean on a fresh checkout, dirty once
+      # `make lint`/`make reviewable` has populated `.cache/`).
       - name: "Gate: grype (module-level CVEs)"
         run: |
           VEX_ARGS=()
           if [ -f "$VEX_EXCEPTIONS" ]; then
             VEX_ARGS=(--vex "$VEX_EXCEPTIONS")
           fi
-          grype dir:. --fail-on "$GRYPE_FAIL_ON" "${VEX_ARGS[@]}" -q
+          grype dir:. --fail-on "$GRYPE_FAIL_ON" "${VEX_ARGS[@]}" -q \
+            --exclude './.cache/**' \
+            --exclude './_output/**' \
+            --exclude './.work/**' \
+            --exclude './bin/**'
 
       # Gate 3: no GPL-family licenses in the dependency tree.
       #
@@ -360,7 +372,17 @@ jobs:
           # absent or truncated report and publish a VEX asserting nothing --
           # indistinguishable from a clean assessment, then attested to the
           # image and attached to the release.
-          grype dir:. -o json --file grype-report.json -q
+          #
+          # Same cache exclusions as Gate 2 above, for the same reason: this
+          # report is attested to the published image, so it must describe
+          # the provider's own dependency tree, not third-party toolchain
+          # binaries the Makefile downloads into git-ignored dirs and that
+          # never ship in that image.
+          grype dir:. -o json --file grype-report.json -q \
+            --exclude './.cache/**' \
+            --exclude './_output/**' \
+            --exclude './.work/**' \
+            --exclude './bin/**'
           if ! jq -e '.matches | type == "array"' grype-report.json >/dev/null; then
             echo "::error::grype report is not a usable document, refusing to risk-score it"
             exit 1
