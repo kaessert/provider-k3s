@@ -16,6 +16,9 @@ PROJECT_NAME := provider-k3s
 # module path, PROJECT_REPO and the xpkg registry org (below) all name. It is
 # a recorded fact, not derived from PROJECT_NAME.
 UP_ORG ?= crossplane-contrib
+ifeq ($(strip $(UP_ORG)),)
+UP_ORG := crossplane-contrib
+endif
 PROJECT_REPO := github.com/crossplane-contrib/$(PROJECT_NAME)
 
 PLATFORMS ?= linux_amd64 linux_arm64
@@ -70,10 +73,10 @@ IMAGES = provider-k3s
 # ====================================================================================
 # Setup XPKG
 
-XPKG_REG_ORGS ?= xpkg.upbound.io/crossplane-contrib
+XPKG_REG_ORGS ?= xpkg.upbound.io/$(UP_ORG)
 # NOTE(hasheddan): skip promoting on xpkg.upbound.io as channel tags are
 # inferred.
-XPKG_REG_ORGS_NO_PROMOTE ?= xpkg.upbound.io/crossplane-contrib
+XPKG_REG_ORGS_NO_PROMOTE ?= xpkg.upbound.io/$(UP_ORG)
 XPKGS = provider-k3s
 -include build/makelib/xpkg.mk
 
