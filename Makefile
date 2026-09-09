@@ -77,6 +77,34 @@ XPKG_REG_ORGS_NO_PROMOTE ?= xpkg.upbound.io/crossplane-contrib
 XPKGS = provider-k3s
 -include build/makelib/xpkg.mk
 
+# ====================================================================================
+# Publishing
+#
+# The crossplane/build xpkg machinery publishes via `crossplane xpkg push`,
+# which authenticates through the Docker keychain (~/.docker/config.json). We
+# publish with the `up` CLI instead so CI can authenticate with an Upbound API
+# token -- the same UP_API_TOKEN / UP_ORG wiring the Upbound configuration
+# packages use. Do NOT pass `--create`: it hits the api.upbound.io
+# repositories endpoint, and robot tokens 401 there. Registry repositories
+# are created out-of-band.
+#
+# NOTE: the `up login` performed by upbound/action-up is NOT what authenticates
+# the push. UP_API_TOKEN is a robot token, and up's RegistryKeychain falls back
+# to the Docker keychain for robot tokens ("robot tokens cannot be used for
+# registry login 401 Unauthorized"), so CI must additionally `docker login`
+# to xpkg.upbound.io with UP_ROBOT_ID as the username. See the "Login to xpkg
+# with robot" step in .github/workflows/release.yaml.
+UP ?= up
+
+xpkg.push.up: ## Push the built xpkg to xpkg.upbound.io using the up CLI.
+	@$(INFO) Pushing package $(XPKG_REG_ORGS)/$(PROJECT_NAME):$(VERSION)
+	@$(UP) xpkg push \
+		$(foreach p,$(XPKG_LINUX_PLATFORMS),-f $(XPKG_OUTPUT_DIR)/$(p)/$(PROJECT_NAME)-$(VERSION).xpkg) \
+		$(XPKG_REG_ORGS)/$(PROJECT_NAME):$(VERSION) || $(FAIL)
+	@$(OK) Pushed package $(XPKG_REG_ORGS)/$(PROJECT_NAME):$(VERSION)
+
+.PHONY: xpkg.push.up
+
 BASE_REF ?= origin/main
 
 check-breaking-changes: ## Fail if a changed CRD reshapes a served schema incompatibly
