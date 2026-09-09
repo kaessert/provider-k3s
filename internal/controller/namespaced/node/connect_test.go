@@ -197,6 +197,44 @@ func TestConnectUnsupportedProviderConfigKind(t *testing.T) {
 	}
 }
 
+// TestConnectMissingClusterDoesNotFailConnect proves the delete-wedge fix:
+// a Connect() whose referenced Cluster is gone still returns a usable
+// client rather than an error. If Connect() itself failed here, the
+// managed reconciler would never reach Observe or Delete, and the Node's
+// finalizer could never clear once its Cluster is gone -- the only
+// recovery being a manual finalizer strip. Create must still fail loudly
+// rather than silently proceed with an empty nodeToken, since CEL only
+// requires clusterRef when managementPolicies allows Create or Update.
+func TestConnectMissingClusterDoesNotFailConnect(t *testing.T) {
+	sshHost, sshPort := startFakeSSHServer(t, nil, sshResponse{})
+
+	pc := newTestProviderConfig("test-pc", "ssh-creds")
+	secret := newTestCredentialsSecret("ssh-creds")
+	kube := newTestKubeClient(pc, secret) // deliberately no Cluster object
+
+	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
+	cr.Spec.ForProvider.ClusterRef = &xpv1.Reference{Name: "gone-cluster"}
+	cr.SetProviderConfigReference(&xpv1.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
+
+	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
+
+	client, err := c.Connect(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Connect: want no error when the referenced Cluster is missing (Observe/Delete must still work), got %v", err)
+	}
+	defer func() {
+		if err := client.Disconnect(context.Background()); err != nil {
+			t.Errorf("Disconnect: %v", err)
+		}
+	}()
+
+	if _, err := client.Create(context.Background(), cr); err == nil {
+		t.Error("want Create to fail loudly when clusterRef could not be resolved, not silently join with an empty nodeToken")
+	} else if !strings.Contains(err.Error(), errGetCluster) {
+		t.Errorf("want the deferred cluster-resolution error surfaced from Create, got %q", err.Error())
+	}
+}
+
 // TestConnectClusterRefOptionalForObserve proves clusterRef being absent
 // (a legal Observe-only adoption, per the root-level CEL rule that gates it
 // on managementPolicies allowing Create or Update) does not fail Connect.

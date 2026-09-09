@@ -234,19 +234,26 @@ func (c *connector) Connect(ctx context.Context, cr *v1alpha1.Node) (managed.Typ
 	// Skip resolution when it is absent: Observe never needs serverHost or
 	// nodeToken, only Create/Update do, and CEL already guarantees clusterRef
 	// is present whenever either of those can run.
+	//
+	// A resolution failure (most commonly: the referenced Cluster was
+	// deleted) must NOT fail Connect(): Observe and Delete never need
+	// serverHost/nodeToken, and if Connect() itself errors, the managed
+	// reconciler never reaches Delete at all -- the Node's finalizer can
+	// then never clear once its Cluster is gone, and the only recovery is
+	// a manual finalizer strip. Instead, remember the error and let
+	// Create/Update -- the only two operations that actually need
+	// serverHost/nodeToken -- fail loudly on it themselves.
 	var serverHost, nodeToken string
+	var clusterErr error
 	if cr.Spec.ForProvider.ClusterRef != nil {
-		serverHost, nodeToken, err = c.resolveClusterInfo(ctx, cr.Spec.ForProvider.ClusterRef.Name, cr.GetNamespace())
-		if err != nil {
-			sshClient.Close() //nolint:errcheck
-			return nil, err
-		}
+		serverHost, nodeToken, clusterErr = c.resolveClusterInfo(ctx, cr.Spec.ForProvider.ClusterRef.Name, cr.GetNamespace())
 	}
 
 	return &external{
 		ssh:        sshClient,
 		serverHost: serverHost,
 		nodeToken:  nodeToken,
+		clusterErr: clusterErr,
 		role:       cr.Spec.ForProvider.Role,
 		kube:       c.kube,
 	}, nil
@@ -280,6 +287,12 @@ type external struct {
 	ssh        *sshclient.Client
 	serverHost string
 	nodeToken  string
+	// clusterErr carries a Connect()-time clusterRef resolution failure
+	// (see the comment in Connect above). Observe and Delete never
+	// consult it -- only Create and Update do, since they are the only
+	// operations that need serverHost/nodeToken to be genuinely resolved
+	// rather than silently empty.
+	clusterErr error
 	role       string
 	// kube writes the last-applied-config annotation directly to the API
 	// server from Update(). crossplane-runtime does not persist an in-memory
@@ -387,6 +400,13 @@ func (e *external) Observe(ctx context.Context, cr *v1alpha1.Node) (managed.Exte
 // joining and report ready. Observe's own poll loop picks up convergence
 // from there.
 func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.ExternalCreation, error) {
+	// A Create that silently proceeds with an empty nodeToken would join a
+	// node to nothing, so a deferred clusterRef resolution failure from
+	// Connect() must fail here rather than be swallowed.
+	if e.clusterErr != nil {
+		return managed.ExternalCreation{}, e.clusterErr
+	}
+
 	cr.SetConditions(xpv1.Creating())
 
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
@@ -413,6 +433,13 @@ func (e *external) Create(ctx context.Context, cr *v1alpha1.Node) (managed.Exter
 // reconfigured agent/server to report ready again (see k3s.JoinCommand's
 // doc comment).
 func (e *external) Update(ctx context.Context, cr *v1alpha1.Node) (managed.ExternalUpdate, error) {
+	// Same reasoning as Create: a deferred clusterRef resolution failure
+	// must not be swallowed by re-running the join script with an empty
+	// nodeToken.
+	if e.clusterErr != nil {
+		return managed.ExternalUpdate{}, e.clusterErr
+	}
+
 	cmd := k3s.JoinCommand(joinParamsFor(cr.Spec.ForProvider, e.serverHost, e.nodeToken))
 
 	_, stderr, err := e.ssh.Execute(ctx, cmd)

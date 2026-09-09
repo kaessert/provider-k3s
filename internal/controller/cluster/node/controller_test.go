@@ -667,6 +667,44 @@ func TestUpdateSuccess(t *testing.T) {
 	}
 }
 
+// TestCreateFailsWhenClusterRefUnresolved proves the fix's other half: a
+// Connect()-time clusterRef resolution failure, deferred onto the external
+// client rather than failing Connect() itself, still surfaces loudly from
+// Create -- never silently joining a node to nothing with an empty
+// nodeToken.
+func TestCreateFailsWhenClusterRefUnresolved(t *testing.T) {
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+	e := &external{
+		clusterErr: errors.Wrap(errors.New(`Cluster.k3s.m.crossplane.io "my-k3s-cluster" not found`), errGetCluster),
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+
+	if _, err := e.Create(context.Background(), cr); err == nil {
+		t.Fatal("want Create to fail when the clusterRef resolution deferred from Connect() failed")
+	} else if !strings.Contains(err.Error(), errGetCluster) {
+		t.Errorf("want the deferred cluster-resolution error surfaced from Create, got %q", err.Error())
+	}
+}
+
+// TestUpdateFailsWhenClusterRefUnresolved is TestCreateFailsWhenClusterRefUnresolved's
+// Update-path twin: re-running the join script with an empty nodeToken
+// would silently reconfigure the node against nothing.
+func TestUpdateFailsWhenClusterRefUnresolved(t *testing.T) {
+	cr := newNodeCR("test-node", "v1.28.2+k3s1", "")
+	e := &external{
+		clusterErr: errors.Wrap(errors.New(`Cluster.k3s.m.crossplane.io "my-k3s-cluster" not found`), errGetCluster),
+		role:       testNodeRoleAgent,
+		kube:       newTestKubeClient(),
+	}
+
+	if _, err := e.Update(context.Background(), cr); err == nil {
+		t.Fatal("want Update to fail when the clusterRef resolution deferred from Connect() failed")
+	} else if !strings.Contains(err.Error(), errGetCluster) {
+		t.Errorf("want the deferred cluster-resolution error surfaced from Update, got %q", err.Error())
+	}
+}
+
 // TestDeleteSuccess (T8) proves a successful uninstall returns no error.
 func TestDeleteSuccess(t *testing.T) {
 	host, port := startFakeSSHServer(t, nil, sshResponse{Stdout: "uninstalled"})
