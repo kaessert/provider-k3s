@@ -323,6 +323,72 @@ e2e.node:
 .PHONY: e2e.node
 .PHONY: e2e.node-delete-order
 
+# The update-tester validates that an annotated example manifest documents
+# every mutable field its type actually has, so a manifest can't silently
+# drift out of sync with the resource it targets. It is consumed as a
+# pinned module from tools/update-tester (a stub module holding only
+# go.mod/go.sum -- no vendored source), so there is no build step: `go -C`
+# runs it directly from the module cache.
+UPDATE_TESTER := go -C tools/update-tester tool crossplane-update-tester
+#
+# apis/ on this provider is flat per scope: apis/cluster/v1alpha1/ and
+# apis/namespaced/v1alpha1/ hold every resource's own *_types.go directly,
+# with no per-resource subdirectory and no zz_ prefix (this provider is
+# hand-written, not code-generated). The types file for a manifest is
+# therefore named after its own examples/ directory: examples/cluster/*.yaml
+# resolves to apis/$scope/v1alpha1/cluster_types.go, examples/node/*.yaml to
+# the equivalent node_types.go.
+#
+# The scope is namespaced when the API group contains a ".m." marker (e.g.
+# k3s.m.crossplane.io) and cluster otherwise (e.g. k3s.crossplane.io). A
+# self-check cross-references the manifest filename convention
+# (*-namespaced.yaml) against the resolved scope so a future naming drift
+# fails loudly instead of silently validating against the wrong types file.
+#
+# Discovery matches a manifest carrying the annotation either inline or in
+# its sidecar (<manifest>.yaml.uptest): the sidecar carries the annotation's
+# text unchanged, just outside the manifest's own *.yaml extension, so a
+# glob scoped to *.yaml alone would silently validate zero fixtures once a
+# manifest migrates -- the false-green this union avoids.
+update-test.validate:
+	@fail=0; \
+	for f in $$( { grep -rl 'crossplane.io/update-test:' examples --include='*.yaml'; \
+	  find examples -name '*.yaml.uptest' -exec grep -l 'crossplane.io/update-test:' {} \; \
+	    | sed 's/\.uptest$$//'; } | sort -u); do \
+	  resource=$$(basename $$(dirname "$$f")); \
+	  av=$$(grep '^apiVersion:' "$$f" | grep 'crossplane.io' | head -1 | awk '{print $$2}'); \
+	  grp=$$(echo "$$av" | cut -d/ -f1); \
+	  case "$$grp" in \
+	    *.m.crossplane.io) scope=namespaced ;; \
+	    *) scope=cluster ;; \
+	  esac; \
+	  case "$$f" in \
+	    *-namespaced.yaml) \
+	      if [ "$$scope" != "namespaced" ]; then \
+	        echo "FAIL: $$f looks namespaced by filename but resolved scope=$$scope from apiVersion=$$av"; \
+	        fail=1; \
+	        continue; \
+	      fi ;; \
+	    *) \
+	      if [ "$$scope" != "cluster" ]; then \
+	        echo "FAIL: $$f looks cluster-scoped by filename but resolved scope=$$scope from apiVersion=$$av"; \
+	        fail=1; \
+	        continue; \
+	      fi ;; \
+	  esac; \
+	  types="apis/$$scope/v1alpha1/$${resource}_types.go"; \
+	  if [ ! -f "$$types" ]; then \
+	    echo "SKIP: $$f — no types file at $$types (apiVersion=$$av)"; \
+	    fail=1; \
+	    continue; \
+	  fi; \
+	  echo "=== $$f ($$types) ==="; \
+	  $(UPDATE_TESTER) validate --types-file "$$PWD/$$types" "$$PWD/$$f" || fail=1; \
+	done; \
+	exit $$fail
+
+.PHONY: update-test.validate
+
 # Generate registration files from directory structure.
 # Produces apis/zz_generated_register.go and
 # internal/controller/zz_generated_register.go.
