@@ -303,7 +303,11 @@ e2e: local-deploy uptest
 # `run --timeout` (tool default 120s) -- the Synced-wait window each of the
 # corpus's 20 field-scope entries (6 Cluster + 6 Cluster-namespaced + 4 Node
 # + 4 Node-namespaced) gets from test/hooks/run-update-tester.sh's `hook`
-# step. Every entry re-runs the full k3s installer
+# step. Set at FILE scope with `?=` and exported below, so every `make e2e*`
+# goal sees it -- including the bare default goal `make e2e`, not only the
+# three named per-resource targets -- while a caller-supplied
+# `UPDATE_TESTER_TIMEOUT=<n> make e2e` still wins over this default. Every
+# entry re-runs the full k3s installer
 # (`curl -sfL https://get.k3s.io | sh`) over SSH -- there is no field that
 # only patches config without also going through that reinstall -- so a
 # transient download retry anywhere in the corpus can consume the window on
@@ -329,7 +333,8 @@ e2e: local-deploy uptest
 # a separate defect: raising the window to clear the measured worst case is
 # what closes it in practice, and the side-effect line itself already names
 # which field the change actually belongs to.
-UPDATE_TESTER_TIMEOUT_MEASURED := 300
+UPDATE_TESTER_TIMEOUT ?= 300
+export UPDATE_TESTER_TIMEOUT
 
 # Per-resource targets — each singleton Cluster/Node scope pair runs as two
 # SEQUENTIAL uptest passes (never comma-joined into one UPTEST_EXAMPLE_LIST)
@@ -337,7 +342,8 @@ UPDATE_TESTER_TIMEOUT_MEASURED := 300
 # would otherwise race. Each recipe line here is bare `$(MAKE) e2e ...` with
 # nothing else chained onto it, so — like local-deploy above — `make -n`
 # stays safe: the recursive submake inherits -n and only prints its own plan.
-e2e.cluster: export UPDATE_TESTER_TIMEOUT := $(UPDATE_TESTER_TIMEOUT_MEASURED)
+# UPDATE_TESTER_TIMEOUT is already exported at file scope above and needs no
+# per-target override here.
 e2e.cluster:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_CLUSTER)
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_NS)
@@ -357,17 +363,17 @@ e2e.cluster:
 # cluster-namespaced.yaml,node-namespaced.yaml concatenation would. Not part
 # of the default `make e2e`/`make e2e.node` runs -- a deliberately separate,
 # explicitly-invoked target, run whenever the Node controller's Connect()
-# changes. Carries the same UPDATE_TESTER_TIMEOUT override as e2e.node
-# below -- it runs the identical UPTEST_MANIFESTS_NODE_NS corpus and is
-# exposed to the same installer-retry risk.
-e2e.node-delete-order: export UPDATE_TESTER_TIMEOUT := $(UPDATE_TESTER_TIMEOUT_MEASURED)
+# changes. Runs the identical UPTEST_MANIFESTS_NODE_NS corpus as e2e.node and
+# is exposed to the same installer-retry risk; UPDATE_TESTER_TIMEOUT is
+# already exported at file scope above and needs no per-target override here.
 e2e.node-delete-order:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_NS)
 	@$(INFO) node-delete-order-check: exercising Cluster-deleted-BEFORE-Node
 	@KUBECTL=$(KUBECTL) ./cluster/local/node-delete-order-check.sh
 	@$(OK) node-delete-order-check passed
 
-e2e.node: export UPDATE_TESTER_TIMEOUT := $(UPDATE_TESTER_TIMEOUT_MEASURED)
+# UPDATE_TESTER_TIMEOUT is already exported at file scope above and needs no
+# per-target override here.
 e2e.node:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_CLUSTER)
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_NS)
