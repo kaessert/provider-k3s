@@ -33,6 +33,11 @@ import (
 
 const testNamespace = "default"
 
+// kindProviderConfig is the namespaced ProviderConfig Kind literal, pulled
+// into a constant because enough fixtures reference it that one more
+// literal trips goconst.
+const kindProviderConfig = "ProviderConfig"
+
 // newTestProviderConfig builds a namespaced ProviderConfig sourcing
 // credentials from secretName, and the matching Secret carrying an SSH
 // password -- so Connect()'s SSH dial has a non-empty auth method to offer
@@ -72,6 +77,29 @@ func newTestClusterProviderConfig(name, secretName string) *v1alpha1.ClusterProv
 		},
 	}
 	return cpc
+}
+
+// newTestProviderConfigWithForeignSecretNamespace builds a namespaced
+// ProviderConfig whose spec names a credential Secret namespace the CR does
+// NOT live in -- proving Connect() pins the lookup to the CR's own
+// namespace rather than trusting the spec's value.
+func newTestProviderConfigWithForeignSecretNamespace(name, secretName, specNamespace string) *v1alpha1.ProviderConfig {
+	pc := &v1alpha1.ProviderConfig{}
+	pc.SetName(name)
+	pc.SetNamespace(testNamespace)
+	pc.Spec = v1alpha1.ProviderConfigSpec{
+		Username: "test",
+		Credentials: v1alpha1.ProviderCredentials{
+			Source: xpv2.CredentialsSourceSecret,
+			CommonCredentialSelectors: xpv2.CommonCredentialSelectors{
+				SecretRef: &xpv2.SecretKeySelector{
+					SecretReference: xpv2.SecretReference{Name: secretName, Namespace: specNamespace},
+					Key:             "password",
+				},
+			},
+		},
+	}
+	return pc
 }
 
 func newTestCredentialsSecret(name string) *corev1.Secret {
@@ -125,7 +153,7 @@ func TestConnectSuccess(t *testing.T) {
 	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
 	cr.Spec.ForProvider.Cluster = ptr.To("my-cluster")
 	cr.Spec.ForProvider.ClusterRef = &xpv2.NamespacedReference{Name: "my-cluster"}
-	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: kindProviderConfig, Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -144,7 +172,7 @@ func TestConnectProviderConfigNotFound(t *testing.T) {
 	kube := newTestKubeClient()
 
 	cr := newTestConnectCR("10.0.0.1", 22, "test-uid")
-	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "missing-pc"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: kindProviderConfig, Name: "missing-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -177,6 +205,36 @@ func TestConnectClusterProviderConfigKindRouting(t *testing.T) {
 	client, err := c.Connect(context.Background(), cr)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
+	}
+	if err := client.Disconnect(context.Background()); err != nil {
+		t.Errorf("Disconnect: %v", err)
+	}
+}
+
+// TestConnectPinsCredentialSecretNamespace proves the namespaced
+// ProviderConfig's credential Secret always resolves in the referencing
+// CR's own namespace: the PC here names an attacker-controlled namespace
+// in its spec, and the only Secret the fake client holds lives in the CR's
+// namespace. If Connect() trusted the spec's namespace, credential
+// extraction would fail; success proves the lookup was pinned to
+// cr.GetNamespace() instead.
+func TestConnectPinsCredentialSecretNamespace(t *testing.T) {
+	sshHost, sshPort := startFakeSSHServer(t, nil, sshResponse{})
+
+	pc := newTestProviderConfigWithForeignSecretNamespace("test-pc", "ssh-creds", "attacker-namespace")
+	secret := newTestCredentialsSecret("ssh-creds") // lives in testNamespace, NOT "attacker-namespace"
+	kube := newTestKubeClient(pc, secret)
+
+	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
+	cr.Spec.ForProvider.Cluster = nil // credential resolution alone is under test; cluster resolution is optional for Connect
+	cr.Spec.ForProvider.ClusterRef = nil
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: kindProviderConfig, Name: "test-pc"})
+
+	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
+
+	client, err := c.Connect(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Connect: want the credential Secret namespace pinned to the CR's own namespace (%q), got %v", testNamespace, err)
 	}
 	if err := client.Disconnect(context.Background()); err != nil {
 		t.Errorf("Disconnect: %v", err)
@@ -220,7 +278,7 @@ func TestConnectMissingClusterDoesNotFailConnect(t *testing.T) {
 	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
 	cr.Spec.ForProvider.Cluster = ptr.To("gone-cluster")
 	cr.Spec.ForProvider.ClusterRef = &xpv2.NamespacedReference{Name: "gone-cluster"}
-	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: kindProviderConfig, Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 
@@ -255,7 +313,7 @@ func TestConnectClusterRefOptionalForObserve(t *testing.T) {
 	cr := newTestConnectCR(sshHost, sshPort, "test-uid")
 	cr.Spec.ForProvider.Cluster = nil // legal: Observe-only adoption, not yet resolved
 	cr.Spec.ForProvider.ClusterRef = nil
-	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: kindProviderConfig, Name: "test-pc"})
 
 	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
 

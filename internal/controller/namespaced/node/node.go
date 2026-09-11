@@ -261,6 +261,14 @@ func (c *connector) resolveProviderConfigSpec(ctx context.Context, cr *v1alpha1.
 		if err := c.kube.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: cr.GetNamespace()}, pc); err != nil {
 			return v1alpha1.ProviderConfigSpec{}, errors.Wrap(err, errGetPC)
 		}
+		// The namespaced ProviderConfig's credential Secret always resolves
+		// in the referencing resource's own namespace: overwrite whatever
+		// namespace the spec carried rather than trusting it, otherwise a
+		// tenant able to write a ProviderConfig in their own namespace could
+		// name a Secret in any other namespace and have it read cluster-wide.
+		if pc.Spec.Credentials.SecretRef != nil {
+			pc.Spec.Credentials.SecretRef.Namespace = cr.GetNamespace()
+		}
 		return pc.Spec, nil
 	case "ClusterProviderConfig":
 		cpc := &v1alpha1.ClusterProviderConfig{}

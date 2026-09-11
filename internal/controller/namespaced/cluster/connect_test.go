@@ -32,6 +32,11 @@ import (
 
 const testNamespace = "default"
 
+// testUsername is the SSH username used by every fixture in this package --
+// pulled into a constant because enough fixtures need one that a fifth
+// literal trips goconst.
+const testUsername = "test"
+
 // newTestProviderConfig builds a namespaced ProviderConfig sourcing
 // credentials from secretName, and the matching Secret carrying an SSH
 // password -- so Connect()'s SSH dial has a non-empty auth method to offer
@@ -41,7 +46,7 @@ func newTestProviderConfig(name, secretName string) *v1alpha1.ProviderConfig {
 	pc.SetName(name)
 	pc.SetNamespace(testNamespace)
 	pc.Spec = v1alpha1.ProviderConfigSpec{
-		Username: "test",
+		Username: testUsername,
 		Credentials: v1alpha1.ProviderCredentials{
 			Source: xpv2.CredentialsSourceSecret,
 			CommonCredentialSelectors: xpv2.CommonCredentialSelectors{
@@ -59,7 +64,7 @@ func newTestClusterProviderConfig(name, secretName string) *v1alpha1.ClusterProv
 	cpc := &v1alpha1.ClusterProviderConfig{}
 	cpc.SetName(name)
 	cpc.Spec = v1alpha1.ProviderConfigSpec{
-		Username: "test",
+		Username: testUsername,
 		Credentials: v1alpha1.ProviderCredentials{
 			Source: xpv2.CredentialsSourceSecret,
 			CommonCredentialSelectors: xpv2.CommonCredentialSelectors{
@@ -71,6 +76,29 @@ func newTestClusterProviderConfig(name, secretName string) *v1alpha1.ClusterProv
 		},
 	}
 	return cpc
+}
+
+// newTestProviderConfigWithForeignSecretNamespace builds a namespaced
+// ProviderConfig whose spec names a credential Secret namespace the CR does
+// NOT live in -- proving Connect() pins the lookup to the CR's own
+// namespace rather than trusting the spec's value.
+func newTestProviderConfigWithForeignSecretNamespace(name, secretName, specNamespace string) *v1alpha1.ProviderConfig {
+	pc := &v1alpha1.ProviderConfig{}
+	pc.SetName(name)
+	pc.SetNamespace(testNamespace)
+	pc.Spec = v1alpha1.ProviderConfigSpec{
+		Username: testUsername,
+		Credentials: v1alpha1.ProviderCredentials{
+			Source: xpv2.CredentialsSourceSecret,
+			CommonCredentialSelectors: xpv2.CommonCredentialSelectors{
+				SecretRef: &xpv2.SecretKeySelector{
+					SecretReference: xpv2.SecretReference{Name: secretName, Namespace: specNamespace},
+					Key:             "password",
+				},
+			},
+		},
+	}
+	return pc
 }
 
 func newTestCredentialsSecret(name string) *corev1.Secret {
@@ -150,6 +178,34 @@ func TestConnectClusterProviderConfigKindRouting(t *testing.T) {
 	client, err := c.Connect(context.Background(), cr)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
+	}
+	if err := client.Disconnect(context.Background()); err != nil {
+		t.Errorf("Disconnect: %v", err)
+	}
+}
+
+// TestConnectPinsCredentialSecretNamespace proves the namespaced
+// ProviderConfig's credential Secret always resolves in the referencing
+// CR's own namespace: the PC here names an attacker-controlled namespace
+// in its spec, and the only Secret the fake client holds lives in the CR's
+// namespace. If Connect() trusted the spec's namespace, credential
+// extraction would fail; success proves the lookup was pinned to
+// cr.GetNamespace() instead.
+func TestConnectPinsCredentialSecretNamespace(t *testing.T) {
+	host, port := startFakeSSHServer(t, nil, sshResponse{})
+
+	pc := newTestProviderConfigWithForeignSecretNamespace("test-pc", "ssh-creds", "attacker-namespace")
+	secret := newTestCredentialsSecret("ssh-creds") // lives in testNamespace, NOT "attacker-namespace"
+	kube := newTestKubeClient(pc, secret)
+
+	cr := newTestConnectCR(host, port, "test-uid")
+	cr.SetProviderConfigReference(&xpv2.ProviderConfigReference{Kind: "ProviderConfig", Name: "test-pc"})
+
+	c := &connector{kube: kube, usage: resource.NewProviderConfigUsageTracker(kube, &v1alpha1.ProviderConfigUsage{})}
+
+	client, err := c.Connect(context.Background(), cr)
+	if err != nil {
+		t.Fatalf("Connect: want the credential Secret namespace pinned to the CR's own namespace (%q), got %v", testNamespace, err)
 	}
 	if err := client.Disconnect(context.Background()); err != nil {
 		t.Errorf("Disconnect: %v", err)
