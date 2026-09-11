@@ -9,7 +9,13 @@ spec:
     port: 22
     k3sChannel: stable
     tlsSAN: k3s.example.com
-    disableTraefik: true
+    # false (rather than the more conservative true) so the update-test
+    # entry for disableTraefik below has a genuine state to change into:
+    # a boolean update-test target must be true (false is indistinguishable
+    # from "not set" after a JSON round-trip and is skipped as a target),
+    # so a baseline of true here would make that entry an unconditional
+    # no-op.
+    disableTraefik: false
     # A live run (2026-09-08) measured the default vxlan flannel backend
     # failing deterministically on this fixture's host: journalctl showed
     # "Starting flannel with backend vxlan" followed within ~1-3s by

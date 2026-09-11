@@ -255,9 +255,25 @@ UPTEST_MANIFESTS_NODE_NS := examples/node/node-namespaced.yaml
 UPTEST_MANIFESTS_CORE := $(UPTEST_MANIFESTS_NODE_NS)
 
 UPTEST_EXAMPLE_LIST ?= $(UPTEST_MANIFESTS_CORE)
+
+# UPTEST_TEST_DIRECTORY is KIND_CLUSTER_NAME-derived and therefore
+# worktree-unique, so two concurrent E2E runs never stage into (or read
+# back) one another's rendered case files. CASE_DIR points the shared
+# convergence barrier (test/hooks/converge-barrier.sh) at uptest's own
+# rendered manifests for this run — never examples/, whose sources still
+# carry unsubstituted placeholders. Exported so the barrier, invoked by
+# uptest itself as a subprocess, inherits it.
+#
+# --post-assert-script replaces the per-resource converge windows the
+# individual post-assert-<resource>.sh hooks used to run with ONE shared
+# barrier invoked once per uptest pass, after every resource's own
+# assertions pass.
+UPTEST_TEST_DIRECTORY := /tmp/uptest-e2e-$(KIND_CLUSTER_NAME)
+export CASE_DIR = $(UPTEST_TEST_DIRECTORY)/case
+
 uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
 	@$(INFO) running automated tests
-	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh --default-timeout=$(UPTEST_DEFAULT_TIMEOUT) || $(FAIL)
+	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh --default-timeout=$(UPTEST_DEFAULT_TIMEOUT) --test-directory=$(UPTEST_TEST_DIRECTORY) --post-assert-script=$(abspath test/hooks/converge-barrier.sh) || $(FAIL)
 	@$(OK) running automated tests
 
 # DRC_FILE is read directly by local.xpkg.deploy.provider.% (build/makelib/
@@ -283,12 +299,51 @@ local-deploy: build controlplane.up $(YQ) local.xpkg.deploy.provider.$(PROJECT_N
 
 e2e: local-deploy uptest
 
+# UPDATE_TESTER_TIMEOUT overrides the update-tester's own per-field
+# `run --timeout` (tool default 120s) -- the Synced-wait window each of the
+# corpus's 20 field-scope entries (6 Cluster + 6 Cluster-namespaced + 4 Node
+# + 4 Node-namespaced) gets from test/hooks/run-update-tester.sh's `hook`
+# step. Set at FILE scope with `?=` and exported below, so every `make e2e*`
+# goal sees it -- including the bare default goal `make e2e`, not only the
+# three named per-resource targets -- while a caller-supplied
+# `UPDATE_TESTER_TIMEOUT=<n> make e2e` still wins over this default. Every
+# entry re-runs the full k3s installer
+# (`curl -sfL https://get.k3s.io | sh`) over SSH -- there is no field that
+# only patches config without also going through that reinstall -- so a
+# transient download retry anywhere in the corpus can consume the window on
+# its own. A live run (2026-09-11) measured this happening on Node's
+# k3sChannel: pod log timestamps show the installer's first
+# "[ERROR] Download failed: cannot execute SSH command: Process exited with
+# status 1" at 20:56:14Z, seven further retries, and eventual success
+# (`Successfully requested update of external resource`) at 20:58:18Z -- a
+# 124s stall against a no-retry happy path measured at 65s (tlsSAN) to 68s
+# (k3sVersion, the corpus's slowest field). The 120s default left ~55s of
+# headroom over that happy path, and this one retry episode used more than
+# that. 300s clears the 124s worst case measured so far by 176s (142%
+# margin) while staying far inside each manifest's own
+# uptest.upbound.io/timeout (1800 Cluster / 3000 Node) and the 5400s
+# admission-slot TTL: a field only ever waits the full window when it is
+# actually retrying, so the extra budget is spent only by whichever field
+# hits a transient failure, not by the other ~19.
+#
+# A field that still exceeds this window has its late-landing change picked
+# up and reported as a "side effect" on the NEXT field tested (observed on
+# extraArgs in the same run, immediately after k3sChannel's timeout) -- that
+# is inherent to testing fields sequentially against one external host, not
+# a separate defect: raising the window to clear the measured worst case is
+# what closes it in practice, and the side-effect line itself already names
+# which field the change actually belongs to.
+UPDATE_TESTER_TIMEOUT ?= 300
+export UPDATE_TESTER_TIMEOUT
+
 # Per-resource targets — each singleton Cluster/Node scope pair runs as two
 # SEQUENTIAL uptest passes (never comma-joined into one UPTEST_EXAMPLE_LIST)
 # because both variants install a k3s server on the same external host and
 # would otherwise race. Each recipe line here is bare `$(MAKE) e2e ...` with
 # nothing else chained onto it, so — like local-deploy above — `make -n`
 # stays safe: the recursive submake inherits -n and only prints its own plan.
+# UPDATE_TESTER_TIMEOUT is already exported at file scope above and needs no
+# per-target override here.
 e2e.cluster:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_CLUSTER)
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_CLUSTER_NS)
@@ -308,13 +363,17 @@ e2e.cluster:
 # cluster-namespaced.yaml,node-namespaced.yaml concatenation would. Not part
 # of the default `make e2e`/`make e2e.node` runs -- a deliberately separate,
 # explicitly-invoked target, run whenever the Node controller's Connect()
-# changes.
+# changes. Runs the identical UPTEST_MANIFESTS_NODE_NS corpus as e2e.node and
+# is exposed to the same installer-retry risk; UPDATE_TESTER_TIMEOUT is
+# already exported at file scope above and needs no per-target override here.
 e2e.node-delete-order:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_NS)
 	@$(INFO) node-delete-order-check: exercising Cluster-deleted-BEFORE-Node
 	@KUBECTL=$(KUBECTL) ./cluster/local/node-delete-order-check.sh
 	@$(OK) node-delete-order-check passed
 
+# UPDATE_TESTER_TIMEOUT is already exported at file scope above and needs no
+# per-target override here.
 e2e.node:
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_CLUSTER)
 	$(MAKE) e2e UPTEST_EXAMPLE_LIST=$(UPTEST_MANIFESTS_NODE_NS)
