@@ -255,9 +255,25 @@ UPTEST_MANIFESTS_NODE_NS := examples/node/node-namespaced.yaml
 UPTEST_MANIFESTS_CORE := $(UPTEST_MANIFESTS_NODE_NS)
 
 UPTEST_EXAMPLE_LIST ?= $(UPTEST_MANIFESTS_CORE)
+
+# UPTEST_TEST_DIRECTORY is KIND_CLUSTER_NAME-derived and therefore
+# worktree-unique, so two concurrent E2E runs never stage into (or read
+# back) one another's rendered case files. CASE_DIR points the shared
+# convergence barrier (test/hooks/converge-barrier.sh) at uptest's own
+# rendered manifests for this run — never examples/, whose sources still
+# carry unsubstituted placeholders. Exported so the barrier, invoked by
+# uptest itself as a subprocess, inherits it.
+#
+# --post-assert-script replaces the per-resource converge windows the
+# individual post-assert-<resource>.sh hooks used to run with ONE shared
+# barrier invoked once per uptest pass, after every resource's own
+# assertions pass.
+UPTEST_TEST_DIRECTORY := /tmp/uptest-e2e-$(KIND_CLUSTER_NAME)
+export CASE_DIR = $(UPTEST_TEST_DIRECTORY)/case
+
 uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
 	@$(INFO) running automated tests
-	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh --default-timeout=$(UPTEST_DEFAULT_TIMEOUT) || $(FAIL)
+	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh --default-timeout=$(UPTEST_DEFAULT_TIMEOUT) --test-directory=$(UPTEST_TEST_DIRECTORY) --post-assert-script=$(abspath test/hooks/converge-barrier.sh) || $(FAIL)
 	@$(OK) running automated tests
 
 # DRC_FILE is read directly by local.xpkg.deploy.provider.% (build/makelib/
