@@ -159,6 +159,18 @@ jobs:
       - get-example-list
     if: ${{ (needs.check-permissions.outputs.permission == 'admin' || needs.check-permissions.outputs.permission == 'write') && github.event.issue.pull_request != null && contains(github.event.comment.body, '/test-examples') }}
     runs-on: ubuntu-latest
+    concurrency:
+      # Every /test-examples trigger in this repository shares one backend --
+      # a live tenant, a fixed-name example object, or (for infobloxnios) a
+      # single WireGuard peer key -- so two concurrent uptest jobs clobber
+      # each other's objects no matter which PR triggered them. The group
+      # key MUST stay a repo-wide constant: keying on github.ref or any other
+      # per-run context value buckets concurrent runs separately and lets the
+      # exact collision this group exists to prevent happen unchanged.
+      # cancel-in-progress MUST stay false: cancelling a live E2E run mid-flight
+      # abandons real objects in a real backend with no teardown.
+      group: uptest-serialize
+      cancel-in-progress: false
     steps:
       - name: Cleanup Disk
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
