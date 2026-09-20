@@ -99,14 +99,39 @@ XPKGS = provider-k3s
 # with robot" step in .github/workflows/release.yaml.
 UP ?= up
 
-xpkg.push.up: ## Push the built xpkg to xpkg.upbound.io using the up CLI.
+XPKG_PLATFORM_FILES := $(foreach p,$(XPKG_LINUX_PLATFORMS),$(XPKG_OUTPUT_DIR)/$(p)/$(PROJECT_NAME)-$(VERSION).xpkg)
+
+# Converges every built platform's io.crossplane.xpkg:base layer to one
+# shared blob. A no-op, byte-for-byte, when every platform already agrees --
+# see hack/normalize-xpkg-base-layer.go for why they sometimes don't.
+#
+# Deliberately NOT declared to depend on `build.all`: the release workflow
+# already runs `make build.all` as its own step before `make xpkg.push.up`
+# (release.yaml's "Build Artifacts" step), and a Make-level dependency here
+# would re-run the entire multi-platform build a second time inside this
+# one, undoing that separation for no benefit.
+xpkg.normalize.base-layer:
+	@$(INFO) Normalizing xpkg base layer across $(words $(XPKG_PLATFORM_FILES)) platform packages
+	@go run hack/normalize-xpkg-base-layer.go $(XPKG_PLATFORM_FILES) || $(FAIL)
+	@$(OK) xpkg base layer normalized
+
+# Fails the build on divergence instead of letting `up xpkg push` burn an
+# immutable tag on a registry rejection. Runs after the normalizer so the
+# only way to see FAIL here is the normalizer itself refusing (a real
+# content difference between platforms, not the key-order bug).
+xpkg.check.base-layer: xpkg.normalize.base-layer
+	@$(INFO) Verifying xpkg base layer consistency across platforms
+	@hack/check-xpkg-base-consistency.sh local $(XPKG_PLATFORM_FILES) || $(FAIL)
+	@$(OK) xpkg base layer consistent
+
+xpkg.push.up: xpkg.check.base-layer ## Push the built xpkg to xpkg.upbound.io using the up CLI.
 	@$(INFO) Pushing package $(XPKG_REG_ORGS)/$(PROJECT_NAME):$(VERSION)
 	@$(UP) xpkg push \
 		$(foreach p,$(XPKG_LINUX_PLATFORMS),-f $(XPKG_OUTPUT_DIR)/$(p)/$(PROJECT_NAME)-$(VERSION).xpkg) \
 		$(XPKG_REG_ORGS)/$(PROJECT_NAME):$(VERSION) || $(FAIL)
 	@$(OK) Pushed package $(XPKG_REG_ORGS)/$(PROJECT_NAME):$(VERSION)
 
-.PHONY: xpkg.push.up
+.PHONY: xpkg.push.up xpkg.check.base-layer xpkg.normalize.base-layer
 
 BASE_REF ?= origin/main
 
