@@ -554,6 +554,30 @@ jobs:
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
 
+      # hack/normalize-xpkg-base-layer.go converges every platform's base
+      # layer to one shared blob before the push above, but only a published
+      # index can prove `up xpkg push` actually carried the
+      # io.crossplane.xpkg=base OCI annotation on every platform -- that
+      # file's header records the two independent per-layer identifiers (the
+      # config's RootFS diffID and its Labels key) the push-time annotate
+      # step reads, and a normalizer that only renamed one of them converged
+      # the content while silently dropping the annotation on every platform
+      # but the donor. `xpkg.check.base-layer` above runs `local` mode, which
+      # identifies the base layer by structure because a pre-push tar
+      # carries no OCI annotations to read -- structurally incapable of
+      # seeing this class of defect. `registry` mode is the only mode that
+      # can see what the registry actually accepted, so it runs here,
+      # against the digest just pushed, with nothing left for a bad index to
+      # reach: a FAIL here fails this run before `attest` or `release` ever
+      # sees the tag.
+      - name: Install crane
+        run: go install github.com/google/go-containerregistry/cmd/crane@v0.21.9
+
+      - name: Verify Base Layer Annotation Survived the Push
+        run: hack/check-xpkg-base-consistency.sh registry "${XPKG_IMAGE}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.pushed.outputs.digest }}
+
   # ════════════════════════════════════════════════════════════════════
   # Sign and attest the published image, and append Marketplace assets.
   # ════════════════════════════════════════════════════════════════════
