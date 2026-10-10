@@ -487,6 +487,18 @@ generate.run: generate-registration
 
 .PHONY: generate-registration
 
+# Normalise import blocks in generated files after all generation has run
+# (controller-gen emits empty import blocks and omits aliases that goimports
+# adds), so a regeneration leaves the tree goimports-clean.
+generate-cleanup:
+	@$(INFO) goimports on generated files
+	@go tool goimports -w . || $(FAIL)
+	@$(OK) goimports on generated files
+
+generate.done: generate-cleanup
+
+.PHONY: generate-cleanup
+
 # Update the submodules, such as the common build scripts.
 submodules:
 	@git submodule sync

@@ -10,11 +10,11 @@
 # the derived artifacts: zz_generated.deepcopy.go,
 # zz_generated.{managed,managedlist,pc,pcu,pculist,resolvers}.go, and the
 # CRD YAML under package/crds/. `make generate` runs this same pipeline
-# in-place, so it DOES detect drift when run directly — but only when
-# someone remembers to run it and check `git diff`. A hand-normalised
-# generated file (goimports stripping an empty `import ()` block, an
-# angryjet output hand-edited after the fact) leaves the working tree
-# looking clean without this adapter to catch it in CI/review.
+# in-place and then runs `go tool goimports -w .` over the result (the
+# generate-cleanup step), so the committed files are the generator output
+# after goimports. This script replays both steps in a scratch copy. It
+# catches what `make generate` only reveals to someone who remembers to run
+# it and check `git diff`: a generated file edited by hand after the fact.
 #
 # Method: because neither controller-gen's object/crd generators nor
 # angryjet's generate-methodsets deduplicate against pre-existing output
@@ -78,9 +78,17 @@ cp go.mod go.sum "$WORK/"
 # controller-gen object+crd, angryjet generate-methodsets), from the
 # scratch copy's apis/ directory so its relative "../package/crds" and
 # "../hack/boilerplate.go.txt" paths resolve inside $WORK, never inside
-# the real tree.
+# the real tree. Then apply the same goimports cleanup `make generate`
+# applies (generate-cleanup), so the comparison is against the committed
+# post-cleanup form.
 if ! ( cd "$WORK/apis" && go generate ./... ) >"$WORK/gen.log" 2>&1; then
   echo "regen-verify: generator pipeline failed on a fresh scratch copy" >&2
+  cat "$WORK/gen.log" >&2
+  exit 3
+fi
+
+if ! ( cd "$WORK" && go tool goimports -w apis ) >>"$WORK/gen.log" 2>&1; then
+  echo "regen-verify: goimports cleanup failed on a fresh scratch copy" >&2
   cat "$WORK/gen.log" >&2
   exit 3
 fi
