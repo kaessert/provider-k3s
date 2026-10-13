@@ -172,7 +172,7 @@ func main() {
 
 	precheckCtx, cancel := context.WithTimeout(context.Background(), safeStartPrecheckTimeout)
 	defer cancel()
-	canSafeStart, err := canWatchCRD(precheckCtx, mgr)
+	canSafeStart, err := canWatchCRD(precheckCtx, mgr, log)
 	kingpin.FatalIfError(err, "SafeStart precheck failed")
 	if canSafeStart {
 		crdGate := new(gate.Gate[schema.GroupVersionKind])
@@ -205,17 +205,27 @@ func main() {
 // short backoff until every verb is allowed or the context deadline is
 // reached, so a fresh pod does not permanently disable SafeStart purely
 // because it raced the RBAC manager at startup.
-func canWatchCRD(ctx context.Context, mgr ctrl.Manager) (bool, error) {
+//
+// A transient error from the review is handled the same way as a denial: it
+// is remembered and polling continues. When the deadline passes without
+// permission, the last error is logged and the caller takes the non-gated
+// fallback. The only error returned is a failed scheme registration.
+func canWatchCRD(ctx context.Context, mgr ctrl.Manager, log logging.Logger) (bool, error) {
 	if err := authv1.AddToScheme(mgr.GetScheme()); err != nil {
 		return false, err
 	}
 
-	var allowed bool
+	var (
+		allowed bool
+		lastErr error
+	)
 	pollErr := wait.PollUntilContextCancel(ctx, safeStartPrecheckInterval, true, func(pollCtx context.Context) (bool, error) {
 		ok, err := hasCRDWatchPermissions(pollCtx, mgr)
-		if err != nil {
-			return false, err
-		}
+		// A transient error is "not yet", exactly like a denial: remember it and
+		// keep polling until the deadline instead of ending the precheck and
+		// crash-looping the pod. ok is false whenever err is set, and lastErr is
+		// cleared by the next review that completes without error.
+		lastErr = err
 		allowed = ok
 		// A denial keeps polling until the context deadline is reached;
 		// permission being granted stops the poll immediately.
@@ -223,6 +233,9 @@ func canWatchCRD(ctx context.Context, mgr ctrl.Manager) (bool, error) {
 	})
 	if pollErr != nil && !wait.Interrupted(pollErr) {
 		return false, pollErr
+	}
+	if !allowed && lastErr != nil {
+		log.Info("SafeStart precheck could not complete a SelfSubjectAccessReview before the deadline", "error", lastErr.Error())
 	}
 	// wait.Interrupted means the context deadline was reached without every
 	// verb being allowed - that is a denial, not an error. allowed already
