@@ -324,6 +324,14 @@ local-deploy: build controlplane.up $(YQ) local.xpkg.deploy.provider.$(PROJECT_N
 
 e2e: local-deploy uptest
 
+.PHONY: e2e-wait-crds
+e2e-wait-crds: $(KUBECTL) ## Wait until every CRD the package owns is Established and served
+	@$(INFO) waiting for every package CRD to be Established and served
+	@KUBECTL=$(KUBECTL) hack/e2e-wait-crds.sh || $(FAIL)
+	@$(OK) every package CRD is Established and served
+
+uptest: e2e-wait-crds
+
 # UPDATE_TESTER_TIMEOUT overrides the update-tester's own per-field
 # `run --timeout` (tool default 120s) -- the Synced-wait window each of the
 # corpus's 20 field-scope entries (6 Cluster + 6 Cluster-namespaced + 4 Node
