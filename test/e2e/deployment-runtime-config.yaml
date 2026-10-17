@@ -1,0 +1,34 @@
+# E2E-only DeploymentRuntimeConfig template.
+#
+# Lowers the provider's --poll interval so the E2E controlplane reconciles every
+# resource several times inside the convergence barrier's observation window
+# (test/hooks/converge-barrier.sh). At the production default (--poll=1m) a
+# healthy resource is never reconciled inside that window, so the barrier
+# cannot tell a settled resource from one stuck in an Update() loop. --debug
+# keeps the controller's per-reconcile log lines the barrier counts. Applied
+# only via local.xpkg.deploy.provider.% (the controlplane.up path reached by
+# `make e2e`/`make e2e.<resource>`) - it never touches
+# production packaging, and the provider's own default (cmd/provider/main.go)
+# stays 1m regardless of this file.
+#
+# __E2E_POLL_INTERVAL__ is substituted by the `e2e-drc` Makefile target with the
+# current value of E2E_POLL_INTERVAL before the rendered copy is applied to the
+# cluster. Do not apply this file directly with kubectl - always go through
+# `make`, which performs the substitution (and also rewrites metadata.name and
+# the package-runtime image).
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: runtimeconfig-e2e
+spec:
+  deploymentTemplate:
+    spec:
+      selector: {}
+      strategy: {}
+      template:
+        spec:
+          containers:
+            - name: package-runtime
+              args:
+                - --debug
+                - --poll=__E2E_POLL_INTERVAL__
