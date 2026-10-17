@@ -74,10 +74,14 @@ linters:
           - dupl
           - errcheck
           - exportloopref
+          - goconst
           - gocyclo
           - gosec
           - unparam
         path: _test(ing)?\.go
+      - linters:
+          - goconst
+        path: ^tools/
       - linters:
           - gocritic
         path: _test\.go
