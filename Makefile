@@ -319,22 +319,64 @@ uptest: $(UPTEST) $(KUBECTL) $(KIND) $(CHAINSAW) $(CROSSPLANE_CLI)
 	@KUBECTL=$(KUBECTL) KIND=$(KIND) CHAINSAW=$(CHAINSAW) CROSSPLANE_CLI=$(CROSSPLANE_CLI) CROSSPLANE_NAMESPACE=$(CROSSPLANE_NAMESPACE) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) $(UPTEST) e2e "$(UPTEST_EXAMPLE_LIST)" --setup-script=cluster/local/setup.sh --default-timeout=$(UPTEST_DEFAULT_TIMEOUT) --test-directory=$(UPTEST_TEST_DIRECTORY) --post-assert-script=$(abspath test/hooks/converge-barrier.sh) || $(FAIL)
 	@$(OK) running automated tests
 
-# DRC_FILE is read directly by local.xpkg.deploy.provider.% (build/makelib/
-# local.xpkg.mk) — set as a target-specific variable here (GNU Make
-# propagates it to this target's prerequisites) rather than passed via a
-# recursive `$(MAKE) local.xpkg.deploy.provider... DRC_FILE=...` recipe
-# call. A recipe line that contains the literal text $(MAKE) is executed by
-# GNU Make for real even under `make -n`, precisely so a recursive submake
-# can inherit the -n flag and keep dry-running; but any OTHER shell command
-# chained onto that same recipe line with `&&` is NOT covered by that
-# propagation and runs for real regardless. This target used to chain two
-# `kubectl wait` calls onto exactly such a line, so `make -n e2e.<slug>`
-# ran them against a cluster that does not exist and aborted the whole
-# dry-run before ever reaching the `uptest` recipe that names the manifest
-# set. Listing the deploy target as an ordinary prerequisite instead keeps
-# every recipe line here free of $(MAKE), so `make -n` only ever prints.
-local-deploy: DRC_FILE := ./examples/deploymentruntimeconfig.yaml
-local-deploy: build controlplane.up $(YQ) local.xpkg.deploy.provider.$(PROJECT_NAME)
+# E2E_POLL_INTERVAL is the controller's --poll during E2E AND the window the
+# convergence barrier (test/hooks/converge-barrier.sh) observes. The two are
+# paired through this one knob: the barrier snapshots a resource, sleeps
+# 1.5 x the interval and re-compares, so it only sees a reconcile (and so only
+# catches an Update() hot loop) if the controller polls faster than that window.
+# At the production default (--poll=1m, cmd/provider/main.go) the barrier's
+# few-10s window sees no reconcile at all and every resource passes untested.
+#
+# `?=` keeps this overridable per invocation (a resource whose backend settles
+# slowly can raise it: `make e2e.<resource> E2E_POLL_INTERVAL=30s`).
+E2E_POLL_INTERVAL ?= 10s
+
+# Reaches update-tester's `converge-all` (the barrier) and `run` subcommands
+# through the post-assert hooks, which read it from the environment. `export`
+# propagates it through uptest -> chainsaw -> the hook subprocess tree.
+#
+# E2E_POLL_INTERVAL is the ONLY supported knob for this pairing. `override`
+# makes a command-line or environment attempt to set
+# UPDATE_TESTER_POLL_INTERVAL directly a no-op: it would unpair the tester's
+# window from the controller's --poll, and every converge would pass because
+# nothing had a chance to happen.
+export override UPDATE_TESTER_POLL_INTERVAL = $(E2E_POLL_INTERVAL)
+
+# Rendered E2E-only DeploymentRuntimeConfig. test/e2e/deployment-runtime-config.yaml
+# is the checked-in template (placeholder: __E2E_POLL_INTERVAL__); the e2e-drc
+# target below substitutes the current E2E_POLL_INTERVAL and writes the result
+# here. build/makelib/local.xpkg.mk's local.xpkg.deploy.provider.% rule reads
+# DRC_FILE and applies it instead of its own built-in default (which passes
+# --debug only) - but only on the local-deploy path, reached from `make e2e`
+# and `make e2e.<resource>`. It never touches production packaging; the
+# provider's own default stays 1m.
+DRC_FILE := $(CACHE_DIR)/e2e-deployment-runtime-config.yaml
+
+# Renders the template's placeholder into $(DRC_FILE).
+#
+# This is listed as a prerequisite of local-deploy (below), not wired onto
+# local.xpkg.deploy.provider.%: that is a pattern rule with a recipe, and GNU
+# Make does not merge prerequisites from a second pattern rule onto it. Serial
+# (non -j) make builds one rule's prerequisites left to right, so the render
+# finishes before the deploy recipe reads $(DRC_FILE). The recipe contains no
+# $(MAKE) and nothing chained onto one, so `make -n` only ever prints.
+#
+# $(YQ) is a prerequisite here as well as on the build/ pattern rule, which
+# reads DRC_FILE through $(YQ) and hard-fails when the binary is not on disk.
+.PHONY: e2e-drc
+e2e-drc: $(YQ)
+	@mkdir -p $(CACHE_DIR)
+	@sed -e 's/--poll=__E2E_POLL_INTERVAL__/--poll=$(E2E_POLL_INTERVAL)/' \
+	     test/e2e/deployment-runtime-config.yaml > $(DRC_FILE)
+
+# local-deploy builds and loads the provider image into the kind cluster and
+# deploys the xpkg. e2e-drc MUST stay before local.xpkg.deploy.provider.* in
+# this list: ordering, not merged prerequisites, is what makes DRC_FILE ready
+# before the deploy recipe reads it. Listing the deploy target as an ordinary
+# prerequisite (rather than a recursive $(MAKE) call with other commands
+# chained onto it) keeps every recipe line free of $(MAKE), so `make -n
+# e2e.<slug>` only prints and never touches a cluster.
+local-deploy: build controlplane.up e2e-drc local.xpkg.deploy.provider.$(PROJECT_NAME)
 	@$(INFO) running locally built provider
 	@$(KUBECTL) wait provider.pkg $(PROJECT_NAME) --for condition=Healthy --timeout 5m
 	@$(KUBECTL) -n $(CROSSPLANE_NAMESPACE) wait --for=condition=Available deployment --all --timeout=5m
