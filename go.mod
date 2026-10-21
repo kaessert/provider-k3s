@@ -1,6 +1,6 @@
 module github.com/crossplane-contrib/provider-k3s
 
-go 1.26.9
+go 1.26.10
 
 tool sigs.k8s.io/controller-tools/cmd/controller-gen
 
