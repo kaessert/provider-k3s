@@ -27,6 +27,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -166,29 +167,20 @@ func (s *server) read(t *testing.T) *referrer {
 	return out
 }
 
-func str(s string) *string { return &s }
-
-func val(s *string) string {
-	if s == nil {
-		return "<nil>"
-	}
-	return *s
-}
-
 func TestOneReferenceChangesOtherKept(t *testing.T) {
 	// The first pass resolved both references. The user then points BRef at
 	// another resource, and the second pass resolves only B anew; A is already
 	// what its reference says.
 	resolve := func(fp *forProvider) {
 		if fp.ARef != nil {
-			fp.A = str("a-" + *fp.ARef)
+			fp.A = ptr.To("a-" + *fp.ARef)
 		}
 		if fp.BRef != nil {
-			fp.B = str("b-" + *fp.BRef)
+			fp.B = ptr.To("b-" + *fp.BRef)
 		}
 	}
 	m := &referrer{resolve: resolve}
-	m.Spec.ForProvider = forProvider{A: str("a-one"), ARef: str("one"), B: str("b-two"), BRef: str("three")}
+	m.Spec.ForProvider = forProvider{A: ptr.To("a-one"), ARef: ptr.To("one"), B: ptr.To("b-two"), BRef: ptr.To("three")}
 
 	kube := stored(t, m)
 	if err := New(kube).ResolveReferences(context.Background(), m); err != nil {
@@ -202,8 +194,8 @@ func TestOneReferenceChangesOtherKept(t *testing.T) {
 		t.Errorf("patch = %s, want %s", kube.patches[0], want)
 	}
 	got := kube.read(t).Spec.ForProvider
-	if val(got.A) != "a-one" || val(got.B) != "b-three" {
-		t.Errorf("stored A=%s B=%s, want a-one and b-three", val(got.A), val(got.B))
+	if ptr.Deref(got.A, "<nil>") != "a-one" || ptr.Deref(got.B, "<nil>") != "b-three" {
+		t.Errorf("stored A=%s B=%s, want a-one and b-three", ptr.Deref(got.A, "<nil>"), ptr.Deref(got.B, "<nil>"))
 	}
 }
 
@@ -214,12 +206,12 @@ func TestAtomicListKeepsUserMember(t *testing.T) {
 	resolve := func(fp *forProvider) {
 		for i := range fp.Parents {
 			if fp.Parents[i].Ref != nil {
-				fp.Parents[i].Value = str("resolved-" + *fp.Parents[i].Ref)
+				fp.Parents[i].Value = ptr.To("resolved-" + *fp.Parents[i].Ref)
 			}
 		}
 	}
 	m := &referrer{resolve: resolve}
-	m.Spec.ForProvider.Parents = []member{{Ref: str("one")}, {Value: str("written-by-user")}}
+	m.Spec.ForProvider.Parents = []member{{Ref: ptr.To("one")}, {Value: ptr.To("written-by-user")}}
 
 	kube := stored(t, m)
 	if err := New(kube).ResolveReferences(context.Background(), m); err != nil {
@@ -227,14 +219,14 @@ func TestAtomicListKeepsUserMember(t *testing.T) {
 	}
 
 	got := kube.read(t).Spec.ForProvider.Parents
-	if len(got) != 2 || val(got[0].Value) != "resolved-one" || val(got[1].Value) != "written-by-user" {
+	if len(got) != 2 || ptr.Deref(got[0].Value, "<nil>") != "resolved-one" || ptr.Deref(got[1].Value, "<nil>") != "written-by-user" {
 		t.Errorf("stored list = %+v, want the resolved member and the user's", got)
 	}
 }
 
 func TestUnchangedSendsNoPatch(t *testing.T) {
 	m := &referrer{resolve: func(*forProvider) {}}
-	m.Spec.ForProvider = forProvider{A: str("a-one"), ARef: str("one")}
+	m.Spec.ForProvider = forProvider{A: ptr.To("a-one"), ARef: ptr.To("one")}
 
 	kube := stored(t, m)
 	if err := New(kube).ResolveReferences(context.Background(), m); err != nil {
@@ -255,7 +247,7 @@ func emptying(fp *forProvider) {
 		fp.B = nil
 	}
 	if fp.BRef != nil {
-		fp.B = str("b-" + *fp.BRef)
+		fp.B = ptr.To("b-" + *fp.BRef)
 	}
 }
 
@@ -269,12 +261,12 @@ func TestWithKeptEmpty(t *testing.T) {
 	}{
 		"EmptyKept": {
 			opts:   []Option{WithKeptEmpty(slots)},
-			before: forProvider{A: str("")},
+			before: forProvider{A: ptr.To("")},
 			wantA:  "",
 			wantB:  "<nil>",
 		},
 		"EmptyDroppedWithoutTheOption": {
-			before:    forProvider{A: str("")},
+			before:    forProvider{A: ptr.To("")},
 			wantA:     "<nil>",
 			wantB:     "<nil>",
 			wantPatch: `{"spec":{"forProvider":{"a":null}}}`,
@@ -287,14 +279,14 @@ func TestWithKeptEmpty(t *testing.T) {
 		},
 		"EmptyWithReferenceResolves": {
 			opts:      []Option{WithKeptEmpty(slots)},
-			before:    forProvider{B: str(""), BRef: str("three")},
+			before:    forProvider{B: ptr.To(""), BRef: ptr.To("three")},
 			wantA:     "<nil>",
 			wantB:     "b-three",
 			wantPatch: `{"spec":{"forProvider":{"b":"b-three"}}}`,
 		},
 		"EmptyKeptAndOtherReferenceResolved": {
 			opts:      []Option{WithKeptEmpty(slots)},
-			before:    forProvider{A: str(""), BRef: str("three")},
+			before:    forProvider{A: ptr.To(""), BRef: ptr.To("three")},
 			wantA:     "",
 			wantB:     "b-three",
 			wantPatch: `{"spec":{"forProvider":{"b":"b-three"}}}`,
@@ -317,8 +309,8 @@ func TestWithKeptEmpty(t *testing.T) {
 			got := kube.read(t).Spec.ForProvider
 			// An absent key and a nil pointer read back the same; the stored
 			// object is what the API server would hold.
-			if val(got.A) != tc.wantA || val(got.B) != tc.wantB {
-				t.Errorf("stored A=%s B=%s, want A=%s B=%s", val(got.A), val(got.B), tc.wantA, tc.wantB)
+			if ptr.Deref(got.A, "<nil>") != tc.wantA || ptr.Deref(got.B, "<nil>") != tc.wantB {
+				t.Errorf("stored A=%s B=%s, want A=%s B=%s", ptr.Deref(got.A, "<nil>"), ptr.Deref(got.B, "<nil>"), tc.wantA, tc.wantB)
 			}
 		})
 	}
@@ -329,7 +321,7 @@ func TestWithKeptEmptyOtherType(t *testing.T) {
 	// is ignored.
 	o := WithKeptEmpty(func(resource.Managed) []**string { return []**string{nil} })
 	m := &referrer{resolve: emptying}
-	m.Spec.ForProvider.A = str("")
+	m.Spec.ForProvider.A = ptr.To("")
 	kube := stored(t, m)
 	if err := New(kube, o).ResolveReferences(context.Background(), m); err != nil {
 		t.Fatalf("ResolveReferences: %v", err)
@@ -363,5 +355,5 @@ func TestWithoutReferencesOrWithErrors(t *testing.T) {
 
 // changing returns a managed resource whose resolution changes its spec.
 func changing() resource.Managed {
-	return &referrer{resolve: func(fp *forProvider) { fp.Note = str("resolved") }}
+	return &referrer{resolve: func(fp *forProvider) { fp.Note = ptr.To("resolved") }}
 }
