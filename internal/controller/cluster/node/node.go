@@ -41,6 +41,7 @@ import (
 
 	v1alpha1 "github.com/crossplane-contrib/provider-k3s/apis/cluster/v1alpha1"
 	sshclient "github.com/crossplane-contrib/provider-k3s/internal/clients/ssh"
+	"github.com/crossplane-contrib/provider-k3s/internal/controller/refresolver"
 	"github.com/crossplane-contrib/provider-k3s/internal/criticalannotation"
 	"github.com/crossplane-contrib/provider-k3s/internal/driftdetection"
 	"github.com/crossplane-contrib/provider-k3s/internal/k3s"
@@ -132,6 +133,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 			usage: resource.NewLegacyProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
 		})),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
+		managed.WithReferenceResolver(refresolver.New(mgr.GetClient())),
 		managed.WithPollInterval(o.PollInterval),
 		managed.WithTimeout(externalTimeout),
 		// host is deterministic and stable (see "External-Name Strategy"
