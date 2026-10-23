@@ -244,6 +244,11 @@ func scanControllerEntries(modulePath string, schemeEntries []schemeEntry) (entr
 			hasConfig = true
 			continue
 		}
+		// refresolver is the shared reference resolver library, not a
+		// controller package: it exposes no Setup/SetupGated to register.
+		if pkg == "refresolver" {
+			continue
+		}
 		// For per-resource layout, only include packages that correspond to a
 		// known API resource. For shared-version layout (including this
 		// provider's scope-fanout packages), include all packages since
