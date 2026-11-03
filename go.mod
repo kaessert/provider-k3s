@@ -15,7 +15,7 @@ require (
 	github.com/crossplane/crossplane/apis/v2 v2.4.0
 	github.com/google/go-cmp v0.7.0
 	github.com/pkg/errors v0.9.1
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2
 	google.golang.org/grpc v1.83.2
 	k8s.io/api v0.37.0
 	k8s.io/apiextensions-apiserver v0.37.0
